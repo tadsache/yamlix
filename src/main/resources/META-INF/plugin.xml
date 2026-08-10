@@ -1,0 +1,46 @@
+<idea-plugin>
+    <id>dev.yamlix.ansible</id>
+    <name>Yamlix - Ansible Navigation</name>
+    <vendor>yamlix</vendor>
+
+    <description><![CDATA[
+    Jump-to-definition and variable resolution for Ansible projects.
+    Reuses the platform's YAML PSI; registers no file type and does not claim
+    <code>*.yml</code>. Ansible context is detected structurally, per file,
+    at reference-contribution time.
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>org.jetbrains.plugins.yaml</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <fileBasedIndex
+            implementation="dev.yamlix.ansible.vars.AnsibleVarIndex"/>
+
+        <psi.referenceContributor
+            language="yaml"
+            implementation="dev.yamlix.ansible.refs.AnsibleReferenceContributor"/>
+
+        <completion.contributor
+            language="yaml"
+            implementationClass="dev.yamlix.ansible.refs.AnsibleCompletionContributor"/>
+
+        <platform.backend.documentation.targetProvider
+            implementation="dev.yamlix.ansible.doc.AnsibleVarDocumentationTargetProvider"/>
+
+        <localInspection
+            language="yaml"
+            shortName="AnsibleUnresolvedReference"
+            displayName="Unresolved Ansible role, task file or include"
+            groupName="Ansible"
+            enabledByDefault="true"
+            level="WARNING"
+            implementationClass="dev.yamlix.ansible.inspection.UnresolvedAnsibleReferenceInspection"/>
+    </extensions>
+
+    <applicationListeners>
+        <listener
+            class="dev.yamlix.ansible.layout.AnsibleVfsListener"
+            topic="com.intellij.openapi.vfs.newvfs.BulkFileListener"/>
+    </applicationListeners>
+</idea-plugin>

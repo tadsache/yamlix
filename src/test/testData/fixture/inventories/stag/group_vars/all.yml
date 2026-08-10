@@ -1,0 +1,11 @@
+---
+app_env: stag
+app_port: 8010
+app_workers: 2
+
+# A variable whose value is itself a Jinja template referencing other vars.
+# Ansible resolves this lazily, at USE time, in the scope of the consumer —
+# so app_url picks up whatever app_port wins where it is rendered.
+app_url: "http://{{ inventory_hostname }}:{{ app_port }}/{{ app_name }}"
+
+ansible_python_interpreter: "{{ ansible_playbook_python }}"

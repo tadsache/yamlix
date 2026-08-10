@@ -1,0 +1,10 @@
+---
+- name: Report what configure.yml sees
+  ansible.builtin.debug:
+    msg: "CONFIGURE app_port={{ app_port }} app_banner={{ app_banner }}"
+
+- name: Ensure the legacy backup hook is present
+  # NAV: import_role from inside a role, targeting a role that lives
+  # outside ./roles -> external-roles/legacy_backup
+  ansible.builtin.import_role:
+    name: legacy_backup

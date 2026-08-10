@@ -1,0 +1,13 @@
+---
+# canary is at the same depth (2) as webservers. The tie is broken by
+# priority, not by file name or load order.
+#
+# DELIBERATE TRAP: the line below is a NO-OP. ansible_group_priority is only
+# honoured when it is set in the inventory source (see hosts.yml), because
+# group_vars files are merged using the priority already present on the Group
+# object. Verified: with the priority only here, webservers won.
+ansible_group_priority: 10
+
+app_port: 8040
+app_workers: 5
+app_log_level: debug

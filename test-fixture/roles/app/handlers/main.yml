@@ -1,0 +1,5 @@
+---
+- name: Restart app
+  # NAV: the notify: string in tasks/main.yml resolves to this handler name.
+  ansible.builtin.debug:
+    msg: "HANDLER restarting {{ app_service }} on port {{ app_port }}"

@@ -1,0 +1,5 @@
+---
+# The sibling candidate. Which of Darwin.yml / RedHat.yml is loaded is only
+# knowable after fact gathering — a plugin can offer both, never one.
+app_port: 8200
+app_pkg_manager: dnf

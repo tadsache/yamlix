@@ -1,0 +1,6 @@
+---
+# The `platform` group exists in prod's graph but has NO group_vars file.
+# A plugin must not assume every group in hosts.yml has a backing file.
+app_port: 9030
+app_workers: 14
+app_log_level: warning

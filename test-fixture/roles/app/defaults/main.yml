@@ -1,0 +1,8 @@
+---
+# Precedence 2 — the weakest source except command-line defaults.
+app_port: 8000
+app_workers: 1
+
+# Another Jinja-templated value, this time in defaults, referencing a var
+# that only inventory supplies.
+app_config_path: "/tmp/yamlix-{{ app_env }}.conf"

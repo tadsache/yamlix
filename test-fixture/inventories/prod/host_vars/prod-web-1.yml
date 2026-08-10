@@ -1,0 +1,4 @@
+---
+# prod-web-2 has no host_vars file — its winner comes from group_vars.
+app_port: 9050
+app_workers: 16

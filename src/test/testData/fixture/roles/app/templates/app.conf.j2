@@ -1,0 +1,10 @@
+# Rendered by roles/app/tasks/main.yml
+# NAV: src: app.conf.j2 -> roles/app/templates/app.conf.j2
+service = {{ app_service }}
+env     = {{ app_env }}
+port    = {{ app_port }}
+workers = {{ app_workers }}
+log     = {{ app_log_level }}
+url     = {{ app_url }}
+owner   = {{ platform_owner | default('unset') }}
+user    = {{ deploy_user }}

@@ -1,0 +1,5 @@
+---
+- name: INI inventory probe
+  hosts: webservers
+  roles:
+    - app
