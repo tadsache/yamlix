@@ -205,3 +205,14 @@ Two pieces are worth knowing about:
 A working plugin with a thorough test suite, not a released product. Not on the
 JetBrains Marketplace. No tool window yet — the role graph is currently walked by
 three separate traversals that should be one service first.
+
+---
+
+## License
+
+[Apache License 2.0](LICENSE).
+
+The `test-fixture/` directory is a synthetic Ansible project written as the
+specification for this plugin. It describes no real infrastructure and contains
+no credentials: every task is `debug`, `file`, `copy` or `template`, and every
+host is `127.0.0.1` over a local connection.
