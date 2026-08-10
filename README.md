@@ -8,7 +8,7 @@ It reuses the platform's YAML PSI. It registers no file type, does not claim
 
 ```
 IntelliJ IDEA 2025.2+ (sinceBuild 252, no upper bound)   Kotlin · Gradle 9 · IJPGP 2.x
-72 tests · IntelliJ Plugin Verifier: Compatible
+76 tests · IntelliJ Plugin Verifier: Compatible
 ```
 
 ---
@@ -31,8 +31,12 @@ Ctrl/⌘+Click resolves the things Ansible resolves at runtime:
 | `hosts:` | the group in the inventory source and its `group_vars` file |
 | `{{ variable }}` | every definition site, ordered by what applies at the caret |
 
-Completion and an unresolved-reference inspection read the same model, so the
-three cannot disagree.
+**Find Usages** works in reverse: from an `app_port:` key in `host_vars`,
+`group_vars`, a role's `defaults` or a `set_fact`, to every `{{ app_port }}`
+that uses it — including uses inside files reached through `include_tasks`.
+
+Completion and an unresolved-reference inspection read the same model, so they
+cannot disagree with navigation.
 
 ### Variable resolution
 
@@ -121,7 +125,7 @@ the platform fought back, and every deviation from the spec with its reason.
 Requires a JDK 17+ to run Gradle; the build provisions a JDK 21 toolchain.
 
 ```bash
-./gradlew test           # 72 tests
+./gradlew test           # 76 tests
 ./gradlew verifyPlugin   # IntelliJ Plugin Verifier
 ./gradlew runIde         # sandbox IDE with the plugin loaded
 ./gradlew buildPlugin    # build/distributions/yamlix-<version>.zip
@@ -162,6 +166,11 @@ likely thing to break on a platform upgrade.
 
 **Extra vars (`-e`) always win and are invisible from a repository.** Every
 resolution says so.
+
+**The Quick Documentation popup renders through Swing's `HTMLEditorKit`** — an
+HTML 3.2 engine. No flexbox, no grid, no `white-space`. The layout is built from
+short labels and the platform's own markup constants because anything wider gets
+its columns squeezed until words break mid-character.
 
 ---
 

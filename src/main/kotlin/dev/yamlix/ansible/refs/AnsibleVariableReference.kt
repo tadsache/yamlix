@@ -72,7 +72,13 @@ class AnsibleVariableReference(
                 val psiFile = manager.findFile(file)
                 if (psiFile != null) {
                     for (definition in definitions) {
-                        val leaf = psiFile.findElementAt(definition.offset) ?: psiFile
+                        // Anchor on the whole `key: value`, not the key token.
+                        // Find Usages starts from the YAMLKeyValue, so that is
+                        // what the wrapper has to be equivalent to.
+                        val leafAt = psiFile.findElementAt(definition.offset)
+                        val leaf = com.intellij.psi.util.PsiTreeUtil.getParentOfType(
+                            leafAt, org.jetbrains.yaml.psi.YAMLKeyValue::class.java, false,
+                        ) ?: leafAt ?: psiFile
                         val scope = scopes["${file.path}#${definition.offset}"]
                         val winsOn = scope?.winsOn.orEmpty()
                         val mayWinOn = scope?.mayWinOn.orEmpty()

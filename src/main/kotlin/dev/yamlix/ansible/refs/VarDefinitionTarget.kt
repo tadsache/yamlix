@@ -40,6 +40,21 @@ class VarDefinitionTarget(
 
     override fun getContainingFile(): PsiFile? = target.containingFile
 
+    /**
+     * Makes Find Usages work through the wrapper.
+     *
+     * `PsiPolyVariantReferenceBase.isReferenceTo` compares `multiResolve`
+     * results against the element the search started from. Our references
+     * resolve to this presentation wrapper rather than to the underlying
+     * `YAMLKeyValue`, so without this the platform sees no match and reports
+     * "No usages found" for a variable with a dozen live uses.
+     */
+    override fun isEquivalentTo(another: PsiElement?): Boolean =
+        another === target || another === this
+
+    /** Find Usages and "go to declaration" should land on the real element. */
+    override fun getNavigationElement(): PsiElement = target
+
     override fun getTextOffset(): Int = target.textOffset
 
     override fun canNavigate(): Boolean = target is Navigatable && target.canNavigate()
