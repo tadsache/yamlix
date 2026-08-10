@@ -108,13 +108,34 @@ class QuickDocumentationTest : AnsibleFixtureTestCase() {
         )
     }
 
-    fun testHtmlHasTheDocumentedColumns() {
+    fun testHtmlCarriesInventoryValueAndSource() {
         val html = documentation("roles/app/tasks/main.yml", 12, "app_workers")
-        assertTrue(html, html.contains("inventory"))
-        assertTrue(html, html.contains("effective value"))
-        assertTrue(html, html.contains("defined in"))
-        assertTrue("expected the stag-web-1 value", html.contains(">6<"))
+        assertTrue(html, html.contains("effective value per inventory"))
+        assertTrue("expected an inventory label", html.contains(">stag<"))
+        assertTrue("expected the stag-web-1 value", html.contains("<code>6</code>"))
+        assertTrue(html, html.contains("defined in "))
         assertTrue("expected the defining file", html.contains("host_vars/stag-web-1.yml"))
+        assertTrue("expected the precedence rank", html.contains("rank 10"))
+    }
+
+    /**
+     * The popup renders through Swing's HTMLEditorKit, which breaks words
+     * mid-character to squeeze an over-wide table. A three-column layout turned
+     * the header "inventory" into "inv / ent / ory", so the renderer must not
+     * emit a table of its own — only the platform's two-column section grid.
+     */
+    fun testLayoutAvoidsTheRenderersTableSqueeze() {
+        val html = documentation("site-playbook.yml", 24, "app_url")
+        val ownTables = Regex("<table").findAll(html).count()
+        val sectionGrids = Regex(Regex.escape(
+            com.intellij.lang.documentation.DocumentationMarkup.SECTIONS_START,
+        )).findAll(html).count()
+        assertEquals(
+            "every table must come from DocumentationMarkup.SECTIONS, not hand-rolled",
+            sectionGrids,
+            ownTables,
+        )
+        assertTrue("sections must actually be used", sectionGrids > 0)
     }
 
     // ---- §3: what must render as unresolved ----------------------------------
@@ -163,7 +184,13 @@ class QuickDocumentationTest : AnsibleFixtureTestCase() {
 
         val html = documentation("site-playbook.yml", 24, "app_url")
         assertTrue("raw template must appear", html.contains("inventory_hostname"))
-        assertTrue("must be labelled unresolved", html.contains("unresolved"))
+        assertTrue("must be labelled unresolved", html.contains("unresolved template"))
+        // A wrapping inline <code> gets one shaded box per line fragment, which
+        // shredded this value into five boxes in the popup.
+        assertFalse(
+            "a long template must not be wrapped in <code>",
+            html.contains("<code>http://"),
+        )
     }
 
     /** §3 — a registered variable's contents only exist at run time. */
