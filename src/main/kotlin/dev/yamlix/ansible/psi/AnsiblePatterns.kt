@@ -48,6 +48,19 @@ object AnsiblePatterns {
      * all route through this so they cannot drift apart.
      */
     fun classify(scalar: YAMLScalar): AnsibleRefKind? {
+        // `hostgroup: web` and `hostgroup: [web]` — the convention this
+        // project uses to pass a group name as a var into `import_playbook`,
+        // consumed downstream as `hosts: "{{ hostgroup | default('all') }}"`.
+        // The key name itself is the signal; it is used this way regardless
+        // of whether it sits under a play's `vars:`, an `import_playbook`
+        // step's `vars:`, or anywhere else.
+        if (PlayStructure.owningKeyValue(scalar)?.keyText?.trim() == "hostgroup") {
+            return AnsibleRefKind.GROUP
+        }
+        if (PlayStructure.owningSequenceKey(scalar) == "hostgroup") {
+            return AnsibleRefKind.GROUP
+        }
+
         // `roles: [- app]` and `dependencies: [- common]`
         PlayStructure.owningSequenceKey(scalar)?.let { key ->
             when (key) {

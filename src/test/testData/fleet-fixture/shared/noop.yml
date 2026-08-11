@@ -1,0 +1,10 @@
+---
+# NAV: a shared helper `import_playbook`'ed before the real play. Every
+# `site-*.yml` in this project starts this way — a `firstPlay()` that just
+# grabs the first entry in the file would pick this no-op instead of the
+# actual play with `roles:`, silently disabling role scoping.
+- hosts: all
+  tasks:
+    - name: noop
+      ansible.builtin.debug:
+        msg: noop

@@ -98,7 +98,8 @@ class AnsibleVariableReference(
                             else -> 3
                         }
                         candidates += Candidate(
-                            priority, definition.scope.rank, file.path, definition.offset, target,
+                            priority, definition.scope.rank, file.canonicalPath ?: file.path,
+                            definition.offset, target,
                         )
                     }
                 }
@@ -117,8 +118,13 @@ class AnsibleVariableReference(
         return candidates
             .distinctBy { Triple(it.path, it.offset, it.rank) }
             .sortedWith(
+                // Ascending rank, not descending: when several sites all WIN
+                // (each for a different host subset — e.g. a broad
+                // `group_vars/all.yml` plus a narrow per-group override), the
+                // broadly-applicable one is what a reader wants first, not
+                // whichever happens to have the highest precedence number.
                 compareBy<Candidate> { it.priority }
-                    .thenByDescending { it.rank }
+                    .thenBy { it.rank }
                     .thenBy { it.path },
             )
             .map { it.target }

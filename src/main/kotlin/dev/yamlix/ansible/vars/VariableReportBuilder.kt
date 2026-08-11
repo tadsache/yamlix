@@ -25,8 +25,27 @@ class VariableReportBuilder(private val project: Project) {
     companion object {
         fun getInstance(project: Project): VariableReportBuilder = project.service()
 
-        /** Guards against a huge dynamic inventory freezing the popup. */
-        const val MAX_HOSTS_PER_INVENTORY = 40
+        /**
+         * Guards against a huge dynamic inventory freezing the popup.
+         *
+         * Real inventories seen in production (NAVIGATION-CASES.md's fixtures
+         * are tiny by comparison) run into the low hundreds of hosts — a
+         * fab-wide `production` inventory alone can have 200+. The cap only
+         * needs to catch pathological/dynamic inventories (cloud auto-scaling
+         * groups etc.) that could have thousands; it must not silently drop
+         * hosts that are a completely normal size for a static inventory file.
+         */
+        const val MAX_HOSTS_PER_INVENTORY = 750
+
+        /**
+         * How many host names to spell out in a "wins on ... / may win on ..."
+         * label before collapsing the rest into "+N more". A site that only
+         * applies to part of an inventory can otherwise list every one of its
+         * dozens of hosts, turning "Choose Declaration" into an unreadable wall
+         * of names.
+         */
+        private const val MAX_HOSTS_NAMED_IN_LABEL = 2
+
 
         /** Expressions whose value can never be known without running Ansible. */
         private val RUNTIME_ONLY = listOf("hostvars", "lookup(", "query(", "vault", "ansible_facts")
@@ -51,11 +70,12 @@ class VariableReportBuilder(private val project: Project) {
         val rows = ArrayList<ReportRow>()
         val caveats = LinkedHashSet<String>()
 
+        val contextHost = file?.let(::contextHostFor)
         val inventoryRoots = file?.let { layout.inventoryRoots(it) } ?: emptyList()
         for (root in inventoryRoots) {
             val graph = graphs.graphFor(root)
             val allHosts = graph.hosts.sorted()
-            val hosts = allHosts.take(MAX_HOSTS_PER_INVENTORY)
+            val hosts = cappedHosts(allHosts, contextHost)
             if (hosts.size < allHosts.size) {
                 caveats += "${root.name}: showing ${hosts.size} of ${allHosts.size} hosts"
             }
@@ -81,12 +101,39 @@ class VariableReportBuilder(private val project: Project) {
         if (inventoryRoots.isEmpty()) {
             caveats += "no inventory found; values shown without a host context"
         }
-        val magic = if (rows.all { it.kind == ValueKind.UNDEFINED }) {
+        val merged = mergeRowsCoveringEveryInventory(rows, inventoryRoots.size)
+        val magic = if (merged.all { it.kind == ValueKind.UNDEFINED }) {
             AnsibleMagicVariables.lookup(name)
         } else {
             null
         }
-        return VariableReport(name, playbook, rows, caveats.toList(), magic)
+        return VariableReport(name, playbook, merged, caveats.toList(), magic)
+    }
+
+    /**
+     * Collapses per-inventory rows into one when they are all the exact same
+     * outcome for literally every inventory the project has.
+     *
+     * `group_vars/all.yml` is the common case: with sixteen inventories the
+     * popup would otherwise render sixteen identical sections, one header per
+     * inventory, for a single value that never actually varies.
+     */
+    private fun mergeRowsCoveringEveryInventory(
+        rows: List<ReportRow>,
+        totalInventories: Int,
+    ): List<ReportRow> {
+        if (totalInventories <= 1) return rows
+        fun signature(row: ReportRow) =
+            listOf(row.kind, row.value, row.winner?.file?.path, row.winner?.offset, row.note)
+
+        val group = rows.filter { it.coversWholeInventory }
+            .groupBy(::signature)
+            .values
+            .firstOrNull { it.size == totalInventories }
+            ?: return rows
+
+        val merged = group.first().copy(inventory = "all inventories", hosts = emptyList())
+        return listOf(merged) + rows.filterNot { it in group }
     }
 
     /**
@@ -111,25 +158,41 @@ class VariableReportBuilder(private val project: Project) {
         val resolver = VariableResolutionService.getInstance(project)
 
         val inScope = HashSet<String>()
-        val wins = LinkedHashMap<String, MutableMap<String, MutableList<String>>>()
-        val mayWin = LinkedHashMap<String, MutableMap<String, MutableList<String>>>()
+        val wins = LinkedHashMap<String, MutableMap<String, WinRecord>>()
+        val mayWin = LinkedHashMap<String, MutableMap<String, WinRecord>>()
         val hostCount = HashMap<String, Int>()
 
         fun record(
-            into: MutableMap<String, MutableMap<String, MutableList<String>>>,
+            into: MutableMap<String, MutableMap<String, WinRecord>>,
             site: VarSite,
             inventory: String,
             host: String,
         ) {
-            into.getOrPut(key(site)) { LinkedHashMap() }
-                .getOrPut(inventory) { ArrayList() }
-                .add(host)
+            val entry = into.getOrPut(key(site)) { LinkedHashMap() }
+                .getOrPut(inventory) { WinRecord() }
+            entry.hosts += host
+            // A group_vars site applies by group membership, not by which
+            // individual hosts happen to be in it — naming the group is both
+            // more precise and shorter than enumerating (or capping) hosts.
+            if (site.scope == VarScope.GROUP_VARS || site.scope == VarScope.GROUP_VARS_ALL) {
+                entry.groupName = site.qualifier
+            }
         }
 
-        val playbooks = layout.playbooksOrNull(file) ?: listOf(null)
+        val contextHost = contextHostFor(file)
+        // `playbooksFor`, not the unfiltered `playbooksOrNull`: sweeping every
+        // playbook in the project regardless of whether the role we're
+        // actually inside is reachable from it lets that *other* playbook's
+        // own unrelated roles get admitted as "winning" candidates here too —
+        // a second role defining the same variable name, used by a completely
+        // different play, would otherwise show up as a false winner just
+        // because some playbook happens to declare it.
+        val resolvedPlaybooks = playbooksFor(file)
+        val playbooks: List<VirtualFile?> = if (resolvedPlaybooks.isEmpty()) listOf(null) else resolvedPlaybooks
+        val inventoryRoots = layout.inventoryRoots(file)
         for (playbook in playbooks) {
-            for (root in layout.inventoryRoots(file)) {
-                val hosts = graphs.graphFor(root).hosts.sorted().take(MAX_HOSTS_PER_INVENTORY)
+            for (root in inventoryRoots) {
+                val hosts = cappedHosts(graphs.graphFor(root).hosts.sorted(), contextHost)
                 hostCount[root.name] = hosts.size
                 for (host in hosts) {
                     val resolution = resolver.resolve(
@@ -155,13 +218,50 @@ class VariableReportBuilder(private val project: Project) {
                 }
             }
         }
+        val allInventoryNames = inventoryRoots.map { it.name }.toSet()
 
-        fun labels(source: Map<String, MutableList<String>>?): List<String> =
-            source.orEmpty().map { (inventory, hosts) ->
-                // Name the hosts only when the site does not apply to all of them.
-                if (hosts.distinct().size == hostCount[inventory]) inventory
-                else "$inventory (${hosts.distinct().joinToString(", ")})"
+        fun labels(source: Map<String, WinRecord>?): List<String> {
+            val entries = source.orEmpty()
+            if (entries.isEmpty()) return emptyList()
+
+            // A site that applies identically across literally every inventory
+            // the project has (`group_vars/all.yml`, most commonly) otherwise
+            // prints one line per inventory — "WINS on production; staging;
+            // development; test; ..." for all sixteen of them — which is
+            // exactly the wall of text a reader is trying to avoid. Collapse
+            // it to a single summary line instead.
+            //
+            // Restricted to sites that carry a real, consistent group
+            // qualifier (i.e. an actual `group_vars` site): a host-based site
+            // that merely *happens* to win everywhere in a small, two- or
+            // three-inventory project is still worth spelling out, since
+            // there is no "this project" wall of text to avoid there.
+            if (allInventoryNames.isNotEmpty() && entries.keys == allInventoryNames) {
+                val groupNames = entries.values.map { it.groupName }.distinct()
+                val group = groupNames.singleOrNull()
+                if (group != null) return listOf("all inventories ($group)")
             }
+
+            return entries.map { (inventory, entry) ->
+                val group = entry.groupName
+                val distinctHosts = entry.hosts.distinct()
+                when {
+                    group != null -> "$inventory ($group)"
+                    distinctHosts.size == hostCount[inventory] -> inventory
+                    else -> {
+                        val shown = distinctHosts.take(MAX_HOSTS_NAMED_IN_LABEL)
+                        val rest = distinctHosts.size - shown.size
+                        val names = if (rest > 0) {
+                            "${shown.joinToString(", ")}, +$rest more"
+                        } else {
+                            shown.joinToString(", ")
+                        }
+                        "$inventory ($names)"
+                    }
+                }
+            }
+        }
+
 
         val all = inScope + wins.keys + mayWin.keys
         return all.associateWith { siteKey ->
@@ -173,7 +273,41 @@ class VariableReportBuilder(private val project: Project) {
         }
     }
 
+    /** Per (site, inventory): the hosts it won on, and — for a group-scoped site — the group name. */
+    private class WinRecord {
+        val hosts = ArrayList<String>()
+        var groupName: String? = null
+    }
+
     private fun key(site: VarSite): String = "${site.file.path}#${site.offset}"
+
+    /**
+     * The host implied by [file] itself, when it *is* a `host_vars` file.
+     *
+     * A large inventory truncates its host sweep to [MAX_HOSTS_PER_INVENTORY]
+     * hosts for performance (NAVIGATION-CASES.md's freeze-guard), sorted
+     * alphabetically. That silently drops any host whose name sorts past the
+     * cutoff — which, in a several-hundred-host production inventory, is most
+     * of them. If the position being resolved lives inside that very host's
+     * `host_vars` file, the cap must not be allowed to exclude it: the user is
+     * looking directly at that host's variables, not doing a project-wide
+     * sweep.
+     */
+    private fun contextHostFor(file: VirtualFile): String? =
+        (VarFileRole.fromPath(file) as? VarFileRole.FlatVars)
+            ?.takeIf { it.scope == VarScope.HOST_VARS }
+            ?.qualifier
+
+    /**
+     * [allHosts], capped to [MAX_HOSTS_PER_INVENTORY] for the sweep, but with
+     * [contextHost] force-included when it exists and would otherwise have
+     * been cut — see [contextHostFor].
+     */
+    private fun cappedHosts(allHosts: List<String>, contextHost: String?): List<String> {
+        val capped = allHosts.take(MAX_HOSTS_PER_INVENTORY)
+        if (contextHost == null || contextHost !in allHosts || contextHost in capped) return capped
+        return (capped.dropLast(1) + contextHost).sorted()
+    }
 
     /** Two hosts share a row when the winner and the value both match. */
     private fun signature(resolution: VarResolution): String {

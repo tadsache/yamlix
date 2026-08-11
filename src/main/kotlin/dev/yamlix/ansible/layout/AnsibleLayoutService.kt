@@ -116,7 +116,14 @@ class AnsibleLayoutService(private val project: Project) {
         roleBasedir?.let(dirs::add)
         basedir?.let(dirs::add)
 
-        return dirs.filter { it.isDirectory }.distinctBy { it.path }
+        // Deduplicated by canonical (symlink-resolved) path, not the logical
+        // one: a `playbooks/<x>/roles -> ../../roles` symlink — a common way
+        // to make a sub-playbook's relative role references work — is a
+        // second logical path to the exact same directory. Deduping on
+        // `.path` alone leaves both in the list, so every role, every
+        // definition inside it, and every "Choose Declaration" candidate
+        // reachable through `roleSearchPath` shows up twice.
+        return dirs.filter { it.isDirectory }.distinctBy { it.canonicalPath ?: it.path }
     }
 
     /** Roots under which `ansible_collections/<ns>/<name>` may be found. */
@@ -126,7 +133,7 @@ class AnsibleLayoutService(private val project: Project) {
         return (cfg?.collectionsPath ?: AnsibleCfg.DEFAULT_COLLECTIONS_PATH)
             .mapNotNull { resolvePath(it, base) }
             .filter { it.isDirectory }
-            .distinctBy { it.path }
+            .distinctBy { it.canonicalPath ?: it.path }
     }
 
     /**

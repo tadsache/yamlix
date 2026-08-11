@@ -1,0 +1,8 @@
+---
+# NAV: reaches `container_monitoring_agent` through the `roles` symlink
+# (playbooks/fleet/roles -> ../../roles) rather than the canonical `roles/`
+# path used by site-container-mon.yml. Both must resolve to the *same* role
+# and the *same* variable definitions — not doubled ones.
+- hosts: containers
+  roles:
+    - container_monitoring_agent

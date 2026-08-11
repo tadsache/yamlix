@@ -9,6 +9,7 @@ import dev.yamlix.ansible.psi.PlayStructure
 import dev.yamlix.ansible.refs.AnsibleTargets
 import org.jetbrains.yaml.psi.YAMLFile
 import org.jetbrains.yaml.psi.YAMLMapping
+import org.jetbrains.yaml.psi.YAMLScalar
 import org.jetbrains.yaml.psi.YAMLSequence
 import org.jetbrains.yaml.psi.YAMLSequenceItem
 
@@ -207,23 +208,30 @@ class PlayFlow(
                     }
 
                     in INCLUDE_VARS -> {
-                        val path = argument?.getKeyValueByKey("file")?.valueText?.trim()
+                        val literalPath = argument?.getKeyValueByKey("file")?.valueText?.trim()
                             ?: kv.valueText.trim()
+                        val templates = loopTemplatesFor(literalPath, task) ?: listOf(literalPath)
                         val kind = if (roleName != null) {
                             AnsibleTargets.FileKind.ROLE_VARS
                         } else {
                             AnsibleTargets.FileKind.PLAY_VARS
                         }
-                        val targets = AnsibleTargets.resolveFile(path, kind, file, project)
-                        if (AnsibleTargets.isTemplated(path)) {
-                            unexpandable += "fact-templated include_vars '$path'"
-                        }
+
                         val stepIndex = steps.lastIndex
-                        targets.forEach {
-                            includeVarsLoads.putIfAbsent(
-                                it.path,
-                                IncludeVarsLoad(stepIndex, path, targets.size),
-                            )
+                        val perTemplateTargets = templates.map {
+                            it to AnsibleTargets.resolveFile(it, kind, file, project)
+                        }
+                        val totalTargets = perTemplateTargets.sumOf { it.second.size }
+                        if (templates.any(AnsibleTargets::isTemplated)) {
+                            unexpandable += "fact-templated include_vars '${templates.joinToString(", ")}'"
+                        }
+                        perTemplateTargets.forEach { (template, targets) ->
+                            targets.forEach {
+                                includeVarsLoads.putIfAbsent(
+                                    it.path,
+                                    IncludeVarsLoad(stepIndex, template, totalTargets),
+                                )
+                            }
                         }
                     }
 
@@ -235,5 +243,41 @@ class PlayFlow(
 
         private fun psi(file: VirtualFile): YAMLFile? =
             PsiManager.getInstance(project).findFile(file) as? YAMLFile
+
+        /**
+         * `include_vars: "{{ item }}"` paired with `with_first_found:` (or
+         * `with_items:` / `loop:`) is the standard "load whichever file
+         * matches" idiom — the value Ansible actually loads is one of the
+         * loop's entries, never the loop-variable placeholder itself.
+         *
+         * Returns null when [includeVarsValue] is not a bare loop placeholder,
+         * so the caller falls back to treating it as a literal/templated path
+         * as before.
+         */
+        private fun loopTemplatesFor(includeVarsValue: String, task: YAMLMapping): List<String>? {
+            if (!includeVarsValue.contains("{{")) return null
+            val loopKey = task.getKeyValueByKey("with_first_found")
+                ?: task.getKeyValueByKey("with_items")
+                ?: task.getKeyValueByKey("loop")
+                ?: return null
+
+            fun scalarsOf(sequence: YAMLSequence): List<String> = sequence.items.mapNotNull { item ->
+                (item.value as? YAMLScalar)?.textValue?.trim()
+            }
+
+            val entries = when (val v = loopKey.value) {
+                is YAMLSequence -> v.items.flatMap { item ->
+                    when (val itemValue = item.value) {
+                        is YAMLScalar -> listOf(itemValue.textValue.trim())
+                        is YAMLMapping ->
+                            (itemValue.getKeyValueByKey("files")?.value as? YAMLSequence)
+                                ?.let(::scalarsOf).orEmpty()
+                        else -> emptyList()
+                    }
+                }
+                else -> emptyList()
+            }
+            return entries.filter { it.isNotEmpty() }.ifEmpty { null }
+        }
     }
 }

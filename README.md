@@ -8,7 +8,7 @@ It reuses the platform's YAML PSI. It registers no file type, does not claim
 
 ```
 IntelliJ IDEA 2025.2+ (sinceBuild 252, no upper bound)   Kotlin · Gradle 9 · IJPGP 2.x
-76 tests · IntelliJ Plugin Verifier: Compatible
+86 tests · IntelliJ Plugin Verifier: Compatible
 ```
 
 ---
@@ -117,6 +117,17 @@ that way — so the specification cannot be quietly edited to match the code.
 
 The three build reports (`MILESTONE-*-REPORT.md`) record what was built, where
 the platform fought back, and every deviation from the spec with its reason.
+
+A second, independent fixture — `fleet-fixture/`, documented in
+`fleet-fixture/FLEET-FIXTURE-CASES.md` — exists purely to keep real-world bug
+reports from regressing: a project-root `group_vars/all.yml` sibling to
+`inventories/`, plain-INI inventories with no file extension, a role's
+`hosts:` pattern matching a sliver of a much bigger inventory, playbooks that
+open with an `import_playbook` step before their real play,
+`include_vars: "{{ item }}"` + `with_first_found:`, and a role reachable
+through a symlinked directory. Every identifier in it is invented — no real
+variable name, hostname, or URL. Same integrity guarantee as the first
+fixture (`FleetFixtureIntegrityTest`), same "byte-identical copy" rule.
 
 ---
 

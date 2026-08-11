@@ -148,15 +148,15 @@ class VariableNavigationTest : AnsibleFixtureTestCase() {
         assertEquals("every site must produce a distinct row", rows.size, rows.toSet().size)
         assertEquals(
             listOf(
+                "group_vars[webservers] = 14 | inventories/prod/group_vars/webservers.yml  ·  rank 7  ·  WINS on prod (webservers)",
+                "group_vars[webservers] = 4 | inventories/stag/group_vars/webservers.yml  ·  rank 7  ·  WINS on stag (webservers)",
                 "host_vars[prod-web-1] = 16 | inventories/prod/host_vars/prod-web-1.yml  ·  rank 10  ·  WINS on prod (prod-web-1)",
                 "host_vars[stag-web-1] = 6 | inventories/stag/host_vars/stag-web-1.yml  ·  rank 10  ·  WINS on stag (stag-web-1)",
-                "group_vars[webservers] = 14 | inventories/prod/group_vars/webservers.yml  ·  rank 7  ·  WINS on prod (prod-web-2)",
-                "group_vars[webservers] = 4 | inventories/stag/group_vars/webservers.yml  ·  rank 7  ·  WINS on stag (stag-web-2)",
-                "group_vars[canary] = 5 | inventories/stag/group_vars/canary.yml  ·  rank 7  ·  in scope",
-                "group_vars[platform] = 3 | inventories/stag/group_vars/platform.yml  ·  rank 7  ·  in scope",
+                "role defaults[app] = 1 | roles/app/defaults/main.yml  ·  rank 2  ·  in scope",
                 "group_vars/all[all] = 12 | inventories/prod/group_vars/all.yml  ·  rank 4  ·  in scope",
                 "group_vars/all[all] = 2 | inventories/stag/group_vars/all.yml  ·  rank 4  ·  in scope",
-                "role defaults[app] = 1 | roles/app/defaults/main.yml  ·  rank 2  ·  in scope",
+                "group_vars[canary] = 5 | inventories/stag/group_vars/canary.yml  ·  rank 7  ·  in scope",
+                "group_vars[platform] = 3 | inventories/stag/group_vars/platform.yml  ·  rank 7  ·  in scope",
             ),
             rows,
         )

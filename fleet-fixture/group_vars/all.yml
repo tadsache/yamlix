@@ -1,0 +1,7 @@
+---
+# Applies to every host in every inventory unless a more specific group_vars
+# file overrides it (see inventories/env-c/group_vars/special_group.yml).
+artifact_repo:
+  url: "https://repo.example.test/generic-release"
+  auth_header:
+    X-Api-Key: "REDACTED"

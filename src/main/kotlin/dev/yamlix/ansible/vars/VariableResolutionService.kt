@@ -119,7 +119,7 @@ class VariableResolutionService(private val project: Project) {
         val groupOrder = graph.groupsForHost(context.host)
             .withIndex().associate { (index, group) -> group.name to index }
 
-        val play = context.playbook?.let { firstPlay(it) }
+        val play = context.playbook?.let { firstPlay(it, context.position) }
         val flow = if (context.playbook != null && play != null) {
             cachedFlow(context.playbook, play)
         } else {
@@ -130,8 +130,9 @@ class VariableResolutionService(private val project: Project) {
         val positionIndex = context.position?.let { flow?.indexOf(it) } ?: Int.MAX_VALUE
         val playRoles = play?.let { staticRoleNames(it) } ?: emptySet()
         val varsFiles = play?.let { varsFilePaths(it, context.playbook!!) } ?: emptySet()
+        val playHosts = eligibleHosts(play, graph)
 
-        val sites = ArrayList<VarSite>()
+        val rawSites = ArrayList<VarSite>()
         FileBasedIndex.getInstance().processValues(
             AnsibleVarIndex.NAME,
             name,
@@ -140,13 +141,21 @@ class VariableResolutionService(private val project: Project) {
                 for (definition in definitions) {
                     admit(
                         file, definition, context, graph, groupOrder,
-                        playRoles, varsFiles, flow, positionIndex,
-                    )?.let(sites::add)
+                        playRoles, varsFiles, playHosts, flow, positionIndex,
+                    )?.let(rawSites::add)
                 }
                 true
             },
             GlobalSearchScope.allScope(project),
         )
+
+        // A directory symlinked into the project tree (a common way to make a
+        // sub-playbook's relative role references work, e.g. `playbooks/foo/
+        // roles -> ../../roles`) gives the same physical file two distinct
+        // logical VFS paths, and both get indexed. Deduping on the *canonical*
+        // path collapses them back to one site instead of doubling every
+        // definition reached that way.
+        val sites = rawSites.distinctBy { Triple(it.file.canonicalPath ?: it.file.path, it.offset, it.scope) }
 
         // Decide the `when:` guards we legitimately can.
         val decided = sites.mapNotNull { site ->
@@ -195,6 +204,7 @@ class VariableResolutionService(private val project: Project) {
         groupOrder: Map<String, Int>,
         playRoles: Set<String>,
         varsFiles: Set<String>,
+        playHosts: Set<String>?,
         flow: PlayFlow?,
         positionIndex: Int,
     ): VarSite? {
@@ -210,33 +220,42 @@ class VariableResolutionService(private val project: Project) {
 
         return when (definition.scope) {
             VarScope.GROUP_VARS_ALL, VarScope.GROUP_VARS -> {
-                if (!VfsUtilCore.isAncestor(context.inventoryRoot, file, false)) return null
+                if (!inVarsScope(file, context)) return null
                 val order = groupOrder[definition.qualifier] ?: return null
                 site(subRank = order)
             }
 
             VarScope.HOST_VARS -> {
-                if (!VfsUtilCore.isAncestor(context.inventoryRoot, file, false)) return null
+                if (!inVarsScope(file, context)) return null
                 if (definition.qualifier != context.host) return null
                 site()
             }
 
             VarScope.PLAY_VARS -> {
                 if (context.playbook != null && file != context.playbook) return null
+                if (playHosts != null && context.host !in playHosts) return null
                 site()
             }
 
             VarScope.VARS_FILE -> {
                 if (context.playbook != null && file.path !in varsFiles) return null
+                if (playHosts != null && context.host !in playHosts) return null
                 site()
             }
 
             // R5: role defaults and role vars of a statically listed role are
-            // visible to the WHOLE play, not just inside that role.
+            // visible to the WHOLE play, not just inside that role — but only
+            // for hosts the play actually targets. A play's `hosts:` pattern
+            // can be a small group inside a much larger inventory (`hosts:
+            // docker` matching one host out of hundreds); without this check
+            // every host in the inventory looked "in scope" for the role's
+            // vars, real Ansible never runs this role for.
             VarScope.ROLE_DEFAULTS, VarScope.ROLE_VARS, VarScope.ROLE_PARAM -> {
                 if (playRoles.isNotEmpty() && definition.qualifier !in playRoles) return null
+                if (playHosts != null && context.host !in playHosts) return null
                 site()
             }
+
 
             VarScope.INCLUDE_VARS -> {
                 val load = flow?.includeVarsLoads?.get(file.path) ?: return null
@@ -269,6 +288,30 @@ class VariableResolutionService(private val project: Project) {
 
             VarScope.BLOCK_VARS, VarScope.TASK_VARS -> site()
         }
+    }
+
+    /**
+     * Whether a `group_vars`/`host_vars` file applies to [context]'s inventory.
+     *
+     * Ansible loads these from two places: next to the specific inventory
+     * source (`inventories/<env>/group_vars/`) *and* next to the playbook/
+     * `ansible.cfg` itself (a top-level `group_vars/`, sibling of
+     * `inventories/`), the latter applying across every inventory. Only the
+     * first form was recognized before — a root-level `group_vars/all.yml`,
+     * which typically defines the value used in the overwhelming majority of
+     * cases with per-inventory files only overriding specific groups, was
+     * invisible to resolution entirely.
+     */
+    private fun inVarsScope(file: VirtualFile, context: ResolutionContext): Boolean {
+        if (VfsUtilCore.isAncestor(context.inventoryRoot, file, false)) return true
+        val base = AnsibleLayoutService.getInstance(project).cfgFor(context.inventoryRoot)?.baseDir
+            ?: return false
+        var dir = file.parent
+        while (dir != null) {
+            if (dir.name == "group_vars" || dir.name == "host_vars") return dir.parent == base
+            dir = dir.parent
+        }
+        return false
     }
 
     /**
@@ -340,9 +383,31 @@ class VariableResolutionService(private val project: Project) {
 
     // ---- play helpers ---------------------------------------------------------
 
-    private fun firstPlay(playbook: VirtualFile): YAMLMapping? {
+    /**
+     * The play whose `roles:`/`vars_files:` apply for this query.
+     *
+     * `PlayStructure.plays()` counts an `import_playbook` step as a "play" too
+     * (needed so `vars:` under it — e.g. `hostgroup:` — can be scoped by
+     * [dev.yamlix.ansible.psi.PlayStructure.enclosingPlay]), but it never
+     * carries `roles:`/`vars_files:` itself. A playbook that opens with one —
+     * a common pattern in this project — would otherwise have its *real* play
+     * skipped in favor of that leading step, leaving [staticRoleNames] empty
+     * and silently disabling R5's role scoping: every role's defaults in the
+     * whole project become "in scope" instead of just the ones actually
+     * reachable from here.
+     */
+    private fun firstPlay(playbook: VirtualFile, position: PsiElement?): YAMLMapping? {
         val psi = PsiManager.getInstance(project).findFile(playbook) as? YAMLFile ?: return null
-        return PlayStructure.plays(psi).firstOrNull()
+        val plays = PlayStructure.plays(psi)
+
+        // A position inside this very playbook file may sit in one of several
+        // real plays; use the one that actually encloses it.
+        if (position?.containingFile?.virtualFile == playbook) {
+            PlayStructure.enclosingPlay(position)
+                ?.takeIf { it.getKeyValueByKey("hosts") != null }
+                ?.let { return it }
+        }
+        return plays.firstOrNull { it.getKeyValueByKey("hosts") != null } ?: plays.firstOrNull()
     }
 
     private fun staticRoleNames(play: YAMLMapping): Set<String> {
@@ -395,5 +460,35 @@ class VariableResolutionService(private val project: Project) {
             ).forEach { paths += it.path }
         }
         return paths
+    }
+
+    /**
+     * The hosts a play's `hosts:` pattern actually targets, or null when the
+     * pattern is dynamic, matches everyone, or otherwise not something we can
+     * be sure about without guessing.
+     *
+     * Ansible's host patterns support far more than this (`web:!excluded`,
+     * `web:&staging`, comma vs. colon, regex with `~`) — anything beyond a
+     * plain union of group/host names is left unrestricted (`null`) rather
+     * than risk excluding a host Ansible would actually target.
+     */
+    private fun eligibleHosts(play: YAMLMapping?, graph: InventoryGraph): Set<String>? {
+        val pattern = play?.getKeyValueByKey("hosts")?.valueText?.trim()
+        if (pattern.isNullOrEmpty() || pattern.contains("{{")) return null
+        if (pattern == InventoryGraph.ALL || pattern == "*") return null
+
+        val tokens = pattern.split(Regex("[:,]")).map { it.trim() }.filter { it.isNotEmpty() }
+        if (tokens.isEmpty()) return null
+        // Exclusions/intersections change the meaning in ways a plain union
+        // cannot express; do not attempt to model them.
+        if (tokens.any { it.startsWith("!") || it.startsWith("&") || it.startsWith("~") }) return null
+
+        val result = LinkedHashSet<String>()
+        for (token in tokens) {
+            if (token == InventoryGraph.ALL || token == "*") return null
+            if (token in graph.hosts) result += token
+            result += graph.hostsInGroup(token)
+        }
+        return result
     }
 }
