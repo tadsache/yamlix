@@ -22,6 +22,7 @@ import dev.yamlix.ansible.psi.PlayStructure
 import org.jetbrains.yaml.psi.YAMLFile
 import org.jetbrains.yaml.psi.YAMLMapping
 import org.jetbrains.yaml.psi.YAMLSequence
+import java.util.Optional
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -108,88 +109,301 @@ class VariableResolutionService(private val project: Project) {
 
         private val FLOW_CACHE_KEY =
             Key.create<CachedValue<ConcurrentHashMap<String, PlayFlow>>>("yamlix.ansible.playFlows")
+
+        private val DEFINITION_CACHE_KEY =
+            Key.create<CachedValue<ConcurrentHashMap<String, List<IndexedDefinition>>>>(
+                "yamlix.ansible.varDefinitions",
+            )
+
+        private val PLAY_SCOPE_CACHE_KEY =
+            Key.create<CachedValue<ConcurrentHashMap<String, List<PlayScope>>>>(
+                "yamlix.ansible.playScopes",
+            )
+
+        private val HOST_VARS_OWNER_CACHE_KEY =
+            Key.create<CachedValue<ConcurrentHashMap<String, Set<String>>>>(
+                "yamlix.ansible.hostVarsOwners",
+            )
+
+        private val LEAD_PLAY_CACHE_KEY =
+            Key.create<CachedValue<ConcurrentHashMap<String, Optional<YAMLMapping>>>>(
+                "yamlix.ansible.leadPlay",
+            )
+
+        /** `group_vars`/`host_vars` next to the inventory source: the lower of the pair. */
+        private const val ADJACENT_TO_INVENTORY = 0
+
+        /** `group_vars`/`host_vars` next to the playbook: outranks the inventory's own. */
+        private const val ADJACENT_TO_PLAYBOOK = 1
+
+        /**
+         * Characters that make a `hosts:` token something other than a literal
+         * group or host name. `[`/`]` cover index slices (`web[0:2]`).
+         */
+        private val PATTERN_OPERATORS = charArrayOf('!', '&', '~', '*', '?', '[', ']')
+
+        /** Targets Ansible provides implicitly, which appear in no inventory. */
+        private val IMPLICIT_HOSTS = setOf("localhost", "127.0.0.1", "::1")
     }
 
     fun resolve(name: String, context: ResolutionContext): VarResolution =
-        resolve(name, context, MAX_NESTED_RESOLVE)
+        Sweep(
+            name, context.inventoryRoot, context.playbook, context.position, context.knownFacts,
+        ).resolve(context.host, MAX_NESTED_RESOLVE)
 
-    private fun resolve(name: String, context: ResolutionContext, budget: Int): VarResolution {
-        val caveats = ArrayList<String>()
-        val graph = InventoryGraphService.getInstance(project).graphFor(context.inventoryRoot)
-        val groupOrder = graph.groupsForHost(context.host)
-            .withIndex().associate { (index, group) -> group.name to index }
-
-        val play = context.playbook?.let { firstPlay(it, context.position) }
-        val flow = if (context.playbook != null && play != null) {
-            cachedFlow(context.playbook, play)
-        } else {
-            null
+    /**
+     * Resolves [name] for many hosts of one inventory in a single pass.
+     *
+     * Callers that sweep a whole inventory — the documentation popup and the
+     * "Choose Declaration" list both do — must use this rather than calling
+     * [resolve] in a loop. Everything except the host itself (the index query,
+     * the play's roles, its `vars_files`, its host pattern, the linearised
+     * flow) is identical across the sweep, and hosts that are equivalent to
+     * the resolver are resolved once and shared. On a fleet-sized project that
+     * is the difference between a visible freeze and an instant popup.
+     */
+    fun resolveAcross(
+        name: String,
+        inventoryRoot: VirtualFile,
+        hosts: List<String>,
+        playbook: VirtualFile? = null,
+        position: PsiElement? = null,
+        knownFacts: Map<String, String> = emptyMap(),
+    ): Map<String, VarResolution> {
+        if (hosts.isEmpty()) return emptyMap()
+        val sweep = Sweep(name, inventoryRoot, playbook, position, knownFacts)
+        val byClass = HashMap<String, VarResolution>()
+        val out = LinkedHashMap<String, VarResolution>(hosts.size)
+        for (host in hosts) {
+            // The key names every input `resolve` actually branches on, so a
+            // cache hit is an identical answer, not a similar one.
+            val resolution = byClass.getOrPut(sweep.equivalenceKey(host)) {
+                sweep.resolve(host, MAX_NESTED_RESOLVE)
+            }
+            out[host] = resolution
         }
-        flow?.unexpandable?.forEach { caveats += it }
+        return out
+    }
 
-        val positionIndex = context.position?.let { flow?.indexOf(it) } ?: Int.MAX_VALUE
-        val playRoles = play?.let { staticRoleNames(it) } ?: emptySet()
-        val varsFiles = play?.let { varsFilePaths(it, context.playbook!!) } ?: emptySet()
-        val playHosts = eligibleHosts(play, graph)
+    /** One indexed definition, hydrated with the file it came from. */
+    private data class IndexedDefinition(val file: VirtualFile, val definition: VarDefinitionData)
 
-        val rawSites = ArrayList<VarSite>()
-        FileBasedIndex.getInstance().processValues(
-            AnsibleVarIndex.NAME,
-            name,
-            null,
-            { file, definitions ->
-                for (definition in definitions) {
-                    admit(
-                        file, definition, context, graph, groupOrder,
-                        playRoles, varsFiles, playHosts, flow, positionIndex,
-                    )?.let(rawSites::add)
+    /**
+     * The `roles:`, `vars_files:` and host pattern of a single play.
+     *
+     * A playbook's plays are modelled individually rather than collapsed into
+     * one: a role listed by two plays with different `hosts:` patterns is in
+     * scope for the union of their hosts, and asking "does any play admit this
+     * role for this host" is the only way to get that right.
+     */
+    private class PlayScope(
+        val roles: Set<String>,
+        val varsFiles: Set<String>,
+        /** Null when the pattern is dynamic or otherwise not safely narrowable. */
+        val hosts: Set<String>?,
+    ) {
+        fun admits(host: String): Boolean = hosts == null || host in hosts
+    }
+
+    /**
+     * One resolution query, minus the host.
+     *
+     * Splitting the host out is what makes [resolveAcross] possible: everything
+     * held here is derived once and reused for every host in the inventory.
+     */
+    private inner class Sweep(
+        private val name: String,
+        private val inventoryRoot: VirtualFile,
+        private val playbook: VirtualFile?,
+        private val position: PsiElement?,
+        private val knownFacts: Map<String, String>,
+    ) {
+        val graph: InventoryGraph = InventoryGraphService.getInstance(project).graphFor(inventoryRoot)
+        private val definitions: List<IndexedDefinition> = definitionsFor(name)
+        private val plays: List<PlayScope> =
+            playbook?.let { playScopesFor(it, inventoryRoot, graph) } ?: emptyList()
+
+        private val flow: PlayFlow? = playbook
+            ?.let { book -> firstPlay(book, position)?.let { cachedFlow(book, it) } }
+        private val positionIndex: Int = position?.let { flow?.indexOf(it) } ?: Int.MAX_VALUE
+
+        /**
+         * Hosts with a `host_vars` file of their own, from the filesystem
+         * rather than the index — a `host_vars` definition of *any* variable
+         * makes a host non-interchangeable, including one only read while
+         * deciding a `when:` guard for some other name.
+         */
+        private val hostsWithOwnVars: Set<String> = hostVarsOwners(inventoryRoot, playbook)
+
+        fun equivalenceKey(host: String): String {
+            val own = if (host in hostsWithOwnVars) host else ""
+            val admitted = plays.joinToString("") { if (it.admits(host)) "1" else "0" }
+            return "${graph.groupSignature(host)}|$own|$admitted"
+        }
+
+        fun resolve(host: String, budget: Int): VarResolution {
+            val caveats = ArrayList<String>()
+            flow?.unexpandable?.forEach { caveats += it }
+
+            val groupOrder = graph.groupsForHost(host)
+                .withIndex().associate { (index, group) -> group.name to index }
+            val context = ResolutionContext(host, inventoryRoot, playbook, position, knownFacts)
+
+            val sites = definitions.mapNotNull { (file, definition) ->
+                admit(file, definition, context, groupOrder, plays, flow, positionIndex)
+            }
+
+            // Decide the `when:` guards we legitimately can.
+            val decided = sites.mapNotNull { site ->
+                when (evaluateGuard(site.guard, context, budget)) {
+                    Guard.FALSE -> null
+                    Guard.TRUE -> site.copy(conditional = site.conditional, conditionReason = null)
+                    Guard.UNKNOWN -> site.copy(
+                        conditional = true,
+                        conditionReason = site.conditionReason
+                            ?: site.guard?.let { "guard '$it' is not statically decidable" },
+                        conditionKind = if (site.conditionKind == ConditionKind.NONE) {
+                            ConditionKind.GUARD
+                        } else {
+                            site.conditionKind
+                        },
+                    )
                 }
-                true
-            },
-            GlobalSearchScope.allScope(project),
-        )
+            }
 
-        // A directory symlinked into the project tree (a common way to make a
-        // sub-playbook's relative role references work, e.g. `playbooks/foo/
-        // roles -> ../../roles`) gives the same physical file two distinct
-        // logical VFS paths, and both get indexed. Deduping on the *canonical*
-        // path collapses them back to one site instead of doubling every
-        // definition reached that way.
-        val sites = rawSites.distinctBy { Triple(it.file.canonicalPath ?: it.file.path, it.offset, it.scope) }
+            val ordered = decided.sortedWith(
+                // File name last, so a same-rank tie is stable across index order.
+                compareBy({ it.rank }, { it.subRank }, { it.file.name }),
+            )
+            val unconditional = ordered.lastOrNull { !it.conditional }
+            val top = ordered.lastOrNull()
+            val conditionalWinner = top?.takeIf {
+                it.conditional && (unconditional == null || it.rank >= unconditional.rank)
+            }
 
-        // Decide the `when:` guards we legitimately can.
-        val decided = sites.mapNotNull { site ->
-            when (val verdict = evaluateGuard(site.guard, context, budget)) {
-                Guard.FALSE -> null
-                Guard.TRUE -> site.copy(conditional = site.conditional, conditionReason = null)
-                Guard.UNKNOWN -> site.copy(
-                    conditional = true,
-                    conditionReason = site.conditionReason
-                        ?: site.guard?.let { "guard '$it' is not statically decidable" },
-                    conditionKind = if (site.conditionKind == ConditionKind.NONE) {
-                        ConditionKind.GUARD
-                    } else {
-                        site.conditionKind
-                    },
+            conditionalWinner?.conditionReason?.let { caveats += it }
+            caveats += "extra vars (-e) always win and cannot be seen from the repo"
+
+            return VarResolution(name, ordered, unconditional, conditionalWinner, caveats.distinct())
+        }
+    }
+
+    /**
+     * Every indexed definition of [name], project-wide, cached until the PSI
+     * changes.
+     *
+     * The index query does not depend on the host, the inventory or the
+     * playbook, so a sweep across a fleet-sized project would otherwise run the
+     * identical query tens of thousands of times.
+     *
+     * Symlink dedup happens here rather than on the resolved sites: a directory
+     * symlinked into the project tree (`playbooks/foo/roles -> ../../roles`, a
+     * common way to make a sub-playbook's relative role references work) gives
+     * the same physical file two logical VFS paths and both get indexed.
+     */
+    private fun definitionsFor(name: String): List<IndexedDefinition> =
+        genericCache(DEFINITION_CACHE_KEY).getOrPut(name) {
+            val raw = ArrayList<IndexedDefinition>()
+            FileBasedIndex.getInstance().processValues(
+                AnsibleVarIndex.NAME,
+                name,
+                null,
+                { file, definitions ->
+                    definitions.forEach { raw += IndexedDefinition(file, it) }
+                    true
+                },
+                GlobalSearchScope.allScope(project),
+            )
+            raw.distinctBy {
+                Triple(
+                    it.file.canonicalPath ?: it.file.path,
+                    it.definition.offset,
+                    it.definition.scope,
                 )
             }
         }
 
-        val ordered = decided.sortedWith(
-            // File name last, so a same-rank tie is stable across index order.
-            compareBy({ it.rank }, { it.subRank }, { it.file.name }),
-        )
-        val unconditional = ordered.lastOrNull { !it.conditional }
-        val top = ordered.lastOrNull()
-        val conditionalWinner = top?.takeIf {
-            it.conditional && (unconditional == null || it.rank >= unconditional.rank)
+    /**
+     * The [PlayScope] of every play in [playbook], cached per playbook and
+     * inventory.
+     *
+     * Resolving a role's `roles:` list walks role directories and their `meta`
+     * dependencies; doing that once per host made it the dominant cost of a
+     * fleet-wide sweep.
+     */
+    private fun playScopesFor(
+        playbook: VirtualFile,
+        inventoryRoot: VirtualFile,
+        graph: InventoryGraph,
+    ): List<PlayScope> =
+        genericCache(PLAY_SCOPE_CACHE_KEY)
+            .getOrPut(cacheKey(playbook.path, inventoryRoot.path)) {
+            val psi = PsiManager.getInstance(project).findFile(playbook) as? YAMLFile
+                ?: return@getOrPut emptyList()
+            PlayStructure.plays(psi)
+                // `import_playbook` steps are counted as plays by PlayStructure
+                // so their `vars:` can be scoped, but they carry no `roles:`,
+                // no `vars_files:` and no host pattern of their own.
+                .filter { it.getKeyValueByKey("hosts") != null }
+                .map { play ->
+                    PlayScope(
+                        roles = staticRoleNames(play),
+                        varsFiles = varsFilePaths(play, playbook),
+                        hosts = eligibleHosts(play, graph),
+                    )
+                }
         }
 
-        conditionalWinner?.conditionReason?.let { caveats += it }
-        caveats += "extra vars (-e) always win and cannot be seen from the repo"
+    /**
+     * Hosts that have a `host_vars` file, looked up by path.
+     *
+     * Both locations Ansible loads from are consulted — next to the inventory
+     * and next to the playbook — because either makes a host distinguishable
+     * from its group-mates during a sweep.
+     */
+    private fun hostVarsOwners(inventoryRoot: VirtualFile, playbook: VirtualFile?): Set<String> =
+        genericCache(HOST_VARS_OWNER_CACHE_KEY).getOrPut(
+            cacheKey(inventoryRoot.path, playbook?.parent?.path ?: ""),
+        ) {
+            val bases = listOfNotNull(
+                inventoryRoot,
+                playbook?.parent,
+                AnsibleLayoutService.getInstance(project).cfgFor(inventoryRoot)?.baseDir,
+            )
+            val owners = HashSet<String>()
+            for (base in bases) {
+                val dir = base.findChild("host_vars") ?: continue
+                for (child in dir.children) {
+                    owners += if (child.isDirectory) child.name else child.nameWithoutExtension
+                }
+            }
+            owners
+        }
 
-        return VarResolution(name, ordered, unconditional, conditionalWinner, caveats.distinct())
-    }
+    /**
+     * A project-level map that empties whenever the PSI or the Ansible layout
+     * changes. Everything cached through it is derived from the sources alone,
+     * so staleness is impossible and the tracker pair is the whole invalidation
+     * story.
+     */
+    /** Joins parts into a map key on a separator no VFS path can contain. */
+    private fun cacheKey(vararg parts: String): String = parts.joinToString("\u0000")
+
+    private fun <V : Any> genericCache(
+        key: Key<CachedValue<ConcurrentHashMap<String, V>>>,
+    ): ConcurrentHashMap<String, V> =
+        CachedValuesManager.getManager(project).getCachedValue(
+            project,
+            key,
+            {
+                CachedValueProvider.Result.create(
+                    ConcurrentHashMap<String, V>(),
+                    PsiModificationTracker.MODIFICATION_COUNT,
+                    AnsibleLayoutTracker,
+                )
+            },
+            false,
+        )
 
     /**
      * Decides whether a definition site applies at all. Returning null means
@@ -200,11 +414,8 @@ class VariableResolutionService(private val project: Project) {
         file: VirtualFile,
         definition: VarDefinitionData,
         context: ResolutionContext,
-        graph: InventoryGraph,
         groupOrder: Map<String, Int>,
-        playRoles: Set<String>,
-        varsFiles: Set<String>,
-        playHosts: Set<String>?,
+        plays: List<PlayScope>,
         flow: PlayFlow?,
         positionIndex: Int,
     ): VarSite? {
@@ -218,28 +429,41 @@ class VariableResolutionService(private val project: Project) {
             definition.valueText, definition.guard, subRank, conditional, reason, conditionKind,
         )
 
+        /** Some play in the playbook runs against this host. */
+        fun anyPlayTargetsHost(): Boolean = plays.isEmpty() || plays.any { it.admits(context.host) }
+
         return when (definition.scope) {
             VarScope.GROUP_VARS_ALL, VarScope.GROUP_VARS -> {
-                if (!inVarsScope(file, context)) return null
+                val adjacency = varsAdjacency(file, context) ?: return null
                 val order = groupOrder[definition.qualifier] ?: return null
-                site(subRank = order)
+                // Ansible orders these `inventory group_vars/all` < `playbook
+                // group_vars/all` < `inventory group_vars/*` < `playbook
+                // group_vars/*`. The enum rank covers the all-vs-specific half;
+                // adjacency is the tie-break within it, so a playbook-adjacent
+                // file beats the inventory-adjacent one for the same group
+                // instead of the two landing in an arbitrary alphabetical tie.
+                site(subRank = order * 2 + adjacency)
             }
 
             VarScope.HOST_VARS -> {
-                if (!inVarsScope(file, context)) return null
+                val adjacency = varsAdjacency(file, context) ?: return null
                 if (definition.qualifier != context.host) return null
-                site()
+                site(subRank = adjacency)
             }
 
             VarScope.PLAY_VARS -> {
                 if (context.playbook != null && file != context.playbook) return null
-                if (playHosts != null && context.host !in playHosts) return null
+                if (!anyPlayTargetsHost()) return null
                 site()
             }
 
             VarScope.VARS_FILE -> {
-                if (context.playbook != null && file.path !in varsFiles) return null
-                if (playHosts != null && context.host !in playHosts) return null
+                if (context.playbook != null &&
+                    plays.none { file.path in it.varsFiles && it.admits(context.host) }
+                ) {
+                    return null
+                }
+                if (!anyPlayTargetsHost()) return null
                 site()
             }
 
@@ -250,12 +474,27 @@ class VariableResolutionService(private val project: Project) {
             // docker` matching one host out of hundreds); without this check
             // every host in the inventory looked "in scope" for the role's
             // vars, real Ansible never runs this role for.
+            //
+            // Asked per play, not against a merged role list: a playbook whose
+            // first play runs `roles: [monitoring]` on `hosts: web` and whose
+            // second runs the same role on `hosts: db` must put that role in
+            // scope for both sets, and for neither set's hosts alone.
             VarScope.ROLE_DEFAULTS, VarScope.ROLE_VARS, VarScope.ROLE_PARAM -> {
-                if (playRoles.isNotEmpty() && definition.qualifier !in playRoles) return null
-                if (playHosts != null && context.host !in playHosts) return null
+                val rolePlays = plays.filter { it.roles.isNotEmpty() }
+                when {
+                    rolePlays.isNotEmpty() ->
+                        if (rolePlays.none {
+                                definition.qualifier in it.roles && it.admits(context.host)
+                            }
+                        ) {
+                            return null
+                        }
+                    // No play declares `roles:` at all (include_role only, say);
+                    // fall back to the host restriction on its own.
+                    !anyPlayTargetsHost() -> return null
+                }
                 site()
             }
-
 
             VarScope.INCLUDE_VARS -> {
                 val load = flow?.includeVarsLoads?.get(file.path) ?: return null
@@ -291,27 +530,43 @@ class VariableResolutionService(private val project: Project) {
     }
 
     /**
-     * Whether a `group_vars`/`host_vars` file applies to [context]'s inventory.
+     * Where a `group_vars`/`host_vars` file sits relative to [context], or null
+     * when it does not apply here at all.
      *
      * Ansible loads these from two places: next to the specific inventory
-     * source (`inventories/<env>/group_vars/`) *and* next to the playbook/
-     * `ansible.cfg` itself (a top-level `group_vars/`, sibling of
-     * `inventories/`), the latter applying across every inventory. Only the
-     * first form was recognized before — a root-level `group_vars/all.yml`,
-     * which typically defines the value used in the overwhelming majority of
-     * cases with per-inventory files only overriding specific groups, was
-     * invisible to resolution entirely.
+     * source (`inventories/<env>/group_vars/`) and next to the playbook
+     * (`playbooks/group_vars/`), the latter applying across every inventory.
+     * Only the first form was recognized before — a root-level
+     * `group_vars/all.yml`, which typically defines the value used in the
+     * overwhelming majority of cases with per-inventory files only overriding
+     * specific groups, was invisible to resolution entirely.
+     *
+     * The `ansible.cfg` directory is accepted alongside the playbook's own
+     * directory. That is deliberately a superset of Ansible's rule: a project
+     * that keeps its playbooks in `playbooks/` almost always still means a
+     * root-level `group_vars/` to apply, and resolution has no playbook at all
+     * when the caret sits in a plain vars file.
+     *
+     * @return [ADJACENT_TO_INVENTORY] or [ADJACENT_TO_PLAYBOOK] — the values
+     *   order correctly as a precedence tie-break — or null when out of scope.
      */
-    private fun inVarsScope(file: VirtualFile, context: ResolutionContext): Boolean {
-        if (VfsUtilCore.isAncestor(context.inventoryRoot, file, false)) return true
-        val base = AnsibleLayoutService.getInstance(project).cfgFor(context.inventoryRoot)?.baseDir
-            ?: return false
+    private fun varsAdjacency(file: VirtualFile, context: ResolutionContext): Int? {
+        if (VfsUtilCore.isAncestor(context.inventoryRoot, file, false)) {
+            return ADJACENT_TO_INVENTORY
+        }
         var dir = file.parent
         while (dir != null) {
-            if (dir.name == "group_vars" || dir.name == "host_vars") return dir.parent == base
+            if (dir.name == "group_vars" || dir.name == "host_vars") break
             dir = dir.parent
         }
-        return false
+        val holder = dir?.parent ?: return null
+
+        val layout = AnsibleLayoutService.getInstance(project)
+        val bases = listOfNotNull(
+            context.playbook?.parent,
+            layout.cfgFor(context.inventoryRoot)?.baseDir,
+        )
+        return if (bases.any { it == holder }) ADJACENT_TO_PLAYBOOK else null
     }
 
     /**
@@ -350,7 +605,12 @@ class VariableResolutionService(private val project: Project) {
             return verdict(known == literal, operator)
         }
 
-        val nested = resolve(variable, context.copy(position = null), budget - 1)
+        // A guard reads a *different* variable, so it needs its own sweep. The
+        // position is dropped: a `when:` is evaluated before the task runs, not
+        // at the caret.
+        val nested = Sweep(
+            variable, context.inventoryRoot, context.playbook, null, context.knownFacts,
+        ).resolve(context.host, budget - 1)
         if (nested.isAmbiguous) return Guard.UNKNOWN
         val value = nested.winner?.valueText ?: return Guard.UNKNOWN
         if (value.contains("{{")) return Guard.UNKNOWN
@@ -397,17 +657,24 @@ class VariableResolutionService(private val project: Project) {
      * reachable from here.
      */
     private fun firstPlay(playbook: VirtualFile, position: PsiElement?): YAMLMapping? {
-        val psi = PsiManager.getInstance(project).findFile(playbook) as? YAMLFile ?: return null
-        val plays = PlayStructure.plays(psi)
-
         // A position inside this very playbook file may sit in one of several
-        // real plays; use the one that actually encloses it.
+        // real plays; use the one that actually encloses it. Not cached — it
+        // depends on the caret, and it only fires when the caret is literally
+        // in this playbook.
         if (position?.containingFile?.virtualFile == playbook) {
             PlayStructure.enclosingPlay(position)
                 ?.takeIf { it.getKeyValueByKey("hosts") != null }
                 ?.let { return it }
         }
-        return plays.firstOrNull { it.getKeyValueByKey("hosts") != null } ?: plays.firstOrNull()
+        // Otherwise the answer depends only on the playbook. A fleet-wide sweep
+        // asks once per inventory per playbook, and this walks the file's PSI.
+        return genericCache(LEAD_PLAY_CACHE_KEY).getOrPut(playbook.path) {
+            val psi = PsiManager.getInstance(project).findFile(playbook) as? YAMLFile
+            val plays = psi?.let(PlayStructure::plays).orEmpty()
+            Optional.ofNullable(
+                plays.firstOrNull { it.getKeyValueByKey("hosts") != null } ?: plays.firstOrNull(),
+            )
+        }.orElse(null)
     }
 
     private fun staticRoleNames(play: YAMLMapping): Set<String> {
@@ -468,9 +735,20 @@ class VariableResolutionService(private val project: Project) {
      * be sure about without guessing.
      *
      * Ansible's host patterns support far more than this (`web:!excluded`,
-     * `web:&staging`, comma vs. colon, regex with `~`) — anything beyond a
-     * plain union of group/host names is left unrestricted (`null`) rather
-     * than risk excluding a host Ansible would actually target.
+     * `web:&staging`, globs, `~regex`, index slices).
+     *
+     * There are three outcomes, and conflating the last two is the trap:
+     *
+     *  - **null — cannot be evaluated.** Templated, or built from operators
+     *    this has no matcher for. Do not restrict: excluding every host would
+     *    make the play's roles, `vars:` and `vars_files:` resolve to nothing,
+     *    and "defined nowhere" is indistinguishable from "defined but hidden".
+     *  - **an empty set — evaluated, and it matches nothing here.** A literal
+     *    group name that simply does not exist in *this* inventory
+     *    (`hosts: legacy_hosts` against an inventory with no such group) is
+     *    fully understood: the play does not run here. Restricting to nothing
+     *    is the correct answer, not a guess.
+     *  - **a populated set** — the ordinary case.
      */
     private fun eligibleHosts(play: YAMLMapping?, graph: InventoryGraph): Set<String>? {
         val pattern = play?.getKeyValueByKey("hosts")?.valueText?.trim()
@@ -479,15 +757,26 @@ class VariableResolutionService(private val project: Project) {
 
         val tokens = pattern.split(Regex("[:,]")).map { it.trim() }.filter { it.isNotEmpty() }
         if (tokens.isEmpty()) return null
-        // Exclusions/intersections change the meaning in ways a plain union
-        // cannot express; do not attempt to model them.
-        if (tokens.any { it.startsWith("!") || it.startsWith("&") || it.startsWith("~") }) return null
 
         val result = LinkedHashSet<String>()
         for (token in tokens) {
-            if (token == InventoryGraph.ALL || token == "*") return null
-            if (token in graph.hosts) result += token
-            result += graph.hostsInGroup(token)
+            // Exclusions and intersections change the meaning in ways a plain
+            // union cannot express; globs, regexes and slices need a matcher
+            // this does not have.
+            if (token.any { it in PATTERN_OPERATORS }) return null
+            if (token == InventoryGraph.ALL) return null
+            // Ansible always supplies an implicit `localhost` that appears in
+            // no inventory. The play really does run, so restricting it to the
+            // inventory's hosts would be wrong in the other direction.
+            if (token in IMPLICIT_HOSTS) return null
+
+            when {
+                token in graph.groups -> result += graph.hostsInGroup(token)
+                token in graph.hosts -> result += token
+                // A literal name this inventory does not have. Contributes no
+                // hosts — which is the answer, not a reason to give up.
+                else -> Unit
+            }
         }
         return result
     }

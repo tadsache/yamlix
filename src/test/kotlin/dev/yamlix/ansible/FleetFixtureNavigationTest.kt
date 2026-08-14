@@ -82,9 +82,14 @@ class FleetFixtureNavigationTest : FleetFixtureTestCase() {
 
     /**
      * F5 + F8 — a role's own default wins and is scoped to its actual target
-     * group; the unrelated role's same-named variable is still offered (never
-     * hidden — see [dev.yamlix.ansible.refs.AnsibleVariableReference]'s own
-     * doc comment) but ranked after it, as an out-of-scope candidate.
+     * group, and the unrelated role's same-named variable is not offered at
+     * all.
+     *
+     * It used to be listed last as an out-of-scope candidate. That was noise:
+     * the two roles never share a play, so it can never be the declaration of
+     * the thing under the caret — it was only ever there because Ansible's
+     * variable namespace is global and the index is keyed by name. See
+     * [dev.yamlix.ansible.refs.AnsibleVariableReference.computeTargets].
      */
     fun testAgentImageOnlyEverWinsFromItsOwnRoleDefaults() {
         val reference = variableReferenceAt(
@@ -92,12 +97,9 @@ class FleetFixtureNavigationTest : FleetFixtureTestCase() {
         )
         val paths = reference.targets().map { relativePath(it) }
         assertEquals(
-            "container_monitoring_agent's own defaults must win and come first; " +
-                "legacy_monitoring_agent's same-named var is still offered, just last",
-            listOf(
-                "roles/container_monitoring_agent/defaults/main.yml",
-                "roles/legacy_monitoring_agent/defaults/main.yml",
-            ),
+            "only container_monitoring_agent's own defaults belong here; " +
+                "legacy_monitoring_agent's same-named var is unreachable from this play",
+            listOf("roles/container_monitoring_agent/defaults/main.yml"),
             paths,
         )
 
@@ -105,23 +107,24 @@ class FleetFixtureNavigationTest : FleetFixtureTestCase() {
             .siteScopes("agent_image", reference.element)
         val winning = scopes.values.firstOrNull { it.winsOn.isNotEmpty() }
             ?: error("no site won at all; scopes=$scopes")
-        assertTrue(
-            "must win only on the 'containers' group, not the whole env-c inventory: ${winning.winsOn}",
-            winning.winsOn.any { it.contains("env-c") && it.contains("c-host-07") },
+        // Named by the group rather than by the one host it holds in each
+        // environment: the play targets `containers`, and "the containers
+        // group" is the finding — `env-a (a-host-01); env-b (b-host-01);
+        // env-c (c-host-07); +1 more` said the same thing at four times the
+        // width. The group is recovered from the hosts won, not from the
+        // play's pattern; see VariableReportBuilder.groupNamed.
+        assertEquals(
+            "must win on the 'containers' group, not on whole inventories",
+            listOf("all inventories (containers)"),
+            winning.winsOn,
         )
     }
 
-    /** F8, reverse direction — from the decoy role's own file, its own default wins and comes first. */
+    /** F8, reverse direction — from the decoy role's own file, only its own default is offered. */
     fun testLegacyRoleDefaultWinsFromItsOwnFile() {
         val reference = variableReferenceAt("roles/legacy_monitoring_agent/tasks/main.yml", 4, "agent_image")
         val paths = reference.targets().map { relativePath(it) }
-        assertEquals(
-            listOf(
-                "roles/legacy_monitoring_agent/defaults/main.yml",
-                "roles/container_monitoring_agent/defaults/main.yml",
-            ),
-            paths,
-        )
+        assertEquals(listOf("roles/legacy_monitoring_agent/defaults/main.yml"), paths)
     }
 
     /** F9 — `include_vars: "{{ item }}"` + `with_first_found:` reaches all four env files. */

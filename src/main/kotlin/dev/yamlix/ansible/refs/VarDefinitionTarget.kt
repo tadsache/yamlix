@@ -8,6 +8,7 @@ import com.intellij.psi.PsiFile
 import com.intellij.psi.impl.FakePsiElement
 import dev.yamlix.ansible.layout.AnsibleLayoutService
 import dev.yamlix.ansible.vars.VarScope
+import org.jetbrains.yaml.psi.YAMLKeyValue
 import javax.swing.Icon
 
 /**
@@ -63,44 +64,86 @@ class VarDefinitionTarget(
         (target as? Navigatable)?.navigate(requestFocus)
     }
 
-    /** Left-hand, bold: what this definition *is* and what it says. */
-    override fun getPresentableText(): String {
-        val where = when (scope) {
-            VarScope.GROUP_VARS, VarScope.GROUP_VARS_ALL ->
-                if (qualifier.isNotEmpty()) "${scope.display}[$qualifier]" else scope.display
-            VarScope.HOST_VARS ->
-                if (qualifier.isNotEmpty()) "host_vars[$qualifier]" else scope.display
-            VarScope.ROLE_DEFAULTS, VarScope.ROLE_VARS, VarScope.ROLE_PARAM ->
-                if (qualifier.isNotEmpty()) "${scope.display}[$qualifier]" else scope.display
-            else -> scope.display
-        }
-        return if (valueText.isNullOrEmpty()) where else "$where = $valueText"
+    /**
+     * Left-hand, bold: where this definition applies, and what it says there.
+     *
+     * Deliberately does *not* repeat the scope, the group/host qualifier, or
+     * the precedence rank. The scope and qualifier are already spelled out by
+     * the path in [getLocationString] — `inventories/env-a/group_vars/all.yml`
+     * says "group_vars", "all" and "env-a" on its own — and the icon carries
+     * the scope for scanning. The rank is an internal number a reader cannot
+     * act on; the list is already ordered by it.
+     */
+    /**
+     * Left-hand, bold: the value, and nothing else.
+     *
+     * The value is what the reader came for, and it is the only field that
+     * differs between every row — so it goes first, where the eye lands and
+     * where rows line up against each other. Everything that qualifies it
+     * (which hosts, which file) is context and belongs in the grey text.
+     */
+    override fun getPresentableText(): String = what()
+
+    /**
+     * What this site says, on one line.
+     *
+     * The index only stores a scalar value, so a mapping or a sequence —
+     * `artifact_repo:` with nested keys, say — arrives here as null and would
+     * otherwise render as the bare scope word, which is exactly the
+     * uninformative noise this row exists to avoid. The value is read back off
+     * the PSI in that case; a popup shows a handful of rows, so the cost is
+     * irrelevant next to being able to see the value at all.
+     */
+    private fun what(): String {
+        valueText?.takeIf { it.isNotBlank() }?.let { return shortValue(it) }
+        val nested = (target as? YAMLKeyValue)?.value?.text
+        return if (nested.isNullOrBlank()) scope.display else shortValue(nested)
+    }
+
+    /** Right-hand, grey: where the value applies, then the file you will land in. */
+    override fun getLocationString(): String = "${where()}  ·  ${path()}"
+
+    private fun path(): String {
+        val file = target.containingFile?.virtualFile ?: return ""
+        val base = AnsibleLayoutService.getInstance(target.project).cfgFor(file)?.baseDir
+        return base?.let { VfsUtilCore.getRelativePath(file, it) } ?: file.name
     }
 
     /**
-     * Right-hand, grey: where you will land, and — the part that makes the list
-     * worth reading — whether this site actually applies at the caret.
+     * Where this site applies at the caret — the first thing a reader wants
+     * when the same variable is defined in a dozen places.
+     *
+     * "overridden" is the case worth naming explicitly: the site does apply
+     * here, it simply never wins anywhere. Without it a losing row is
+     * indistinguishable from a winning one.
      */
-    override fun getLocationString(): String {
-        val file = target.containingFile?.virtualFile
-        val path = if (file == null) {
-            ""
-        } else {
-            val base = AnsibleLayoutService.getInstance(target.project).cfgFor(file)?.baseDir
-            base?.let { VfsUtilCore.getRelativePath(file, it) } ?: file.name
-        }
-        val status = when {
-            winsOn.isNotEmpty() && mayWinOn.isNotEmpty() ->
-                "WINS on ${winsOn.joinToString("; ")}, may win on ${mayWinOn.joinToString("; ")}"
-            winsOn.isNotEmpty() -> "WINS on ${winsOn.joinToString("; ")}"
-            mayWinOn.isNotEmpty() -> "may win on ${mayWinOn.joinToString("; ")}"
-            !inScope -> "not in scope here"
-            else -> "in scope"
-        }
-        return "$path  ·  rank ${scope.rank}  ·  $status"
+    private fun where(): String = when {
+        winsOn.isNotEmpty() && mayWinOn.isNotEmpty() ->
+            "${winsOn.joinToString("; ")}; may win on ${mayWinOn.joinToString("; ")}"
+        winsOn.isNotEmpty() -> winsOn.joinToString("; ")
+        mayWinOn.isNotEmpty() -> "may win on ${mayWinOn.joinToString("; ")}"
+        !inScope -> "not in scope here"
+        else -> "overridden"
+    }
+
+    /**
+     * A value on one line, short enough not to push the file path off-screen.
+     *
+     * A mapping or a folded block is legitimately long; Quick Documentation
+     * renders it in full, so truncating here loses nothing a reader cannot
+     * immediately get.
+     */
+    private fun shortValue(value: String): String {
+        val flat = value.replace(WHITESPACE, " ").trim()
+        return if (flat.length <= MAX_VALUE_CHARS) flat else flat.take(MAX_VALUE_CHARS).trimEnd() + "…"
     }
 
     override fun getName(): String = presentableText
+
+    private companion object {
+        const val MAX_VALUE_CHARS = 60
+        val WHITESPACE = Regex("\\s+")
+    }
 
     override fun getIcon(open: Boolean): Icon = when (scope) {
         VarScope.ROLE_DEFAULTS -> AllIcons.Nodes.PropertyReadStatic

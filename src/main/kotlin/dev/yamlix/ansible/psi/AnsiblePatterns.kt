@@ -4,6 +4,7 @@ import com.intellij.patterns.ElementPattern
 import com.intellij.patterns.PatternCondition
 import com.intellij.patterns.PlatformPatterns
 import com.intellij.util.ProcessingContext
+import dev.yamlix.ansible.refs.GroupKeyConvention
 import org.jetbrains.yaml.psi.YAMLScalar
 
 /**
@@ -48,19 +49,6 @@ object AnsiblePatterns {
      * all route through this so they cannot drift apart.
      */
     fun classify(scalar: YAMLScalar): AnsibleRefKind? {
-        // `hostgroup: web` and `hostgroup: [web]` — the convention this
-        // project uses to pass a group name as a var into `import_playbook`,
-        // consumed downstream as `hosts: "{{ hostgroup | default('all') }}"`.
-        // The key name itself is the signal; it is used this way regardless
-        // of whether it sits under a play's `vars:`, an `import_playbook`
-        // step's `vars:`, or anywhere else.
-        if (PlayStructure.owningKeyValue(scalar)?.keyText?.trim() == "hostgroup") {
-            return AnsibleRefKind.GROUP
-        }
-        if (PlayStructure.owningSequenceKey(scalar) == "hostgroup") {
-            return AnsibleRefKind.GROUP
-        }
-
         // `roles: [- app]` and `dependencies: [- common]`
         PlayStructure.owningSequenceKey(scalar)?.let { key ->
             when (key) {
@@ -107,15 +95,36 @@ object AnsiblePatterns {
     }
 
     /**
-     * Matches a scalar that either sits in a referencing position, or contains a
-     * `{{ … }}` expression (case N13). The `{{` test is a cheap text check so
-     * the common case — an ordinary scalar — costs almost nothing.
+     * Matches a scalar that sits in a referencing position, contains a
+     * `{{ … }}` expression (case N13), or is assigned to a key this project
+     * uses for group names. The `{{` test is a cheap text check so the common
+     * case — an ordinary scalar — costs almost nothing.
      */
     fun anyAnsibleReference(): ElementPattern<YAMLScalar> =
         PlatformPatterns.psiElement(YAMLScalar::class.java).with(
             object : PatternCondition<YAMLScalar>("ansibleReference") {
                 override fun accepts(scalar: YAMLScalar, context: ProcessingContext?): Boolean =
-                    classify(scalar) != null || scalar.textContains('{')
+                    classify(scalar) != null ||
+                        scalar.textContains('{') ||
+                        isConventionKey(scalar)
             },
         )
+
+    /**
+     * Whether this scalar's key is one the project uses to carry a group name.
+     *
+     * The gate has to know: `hostgroup: containers` holds no Jinja and matches
+     * no syntactic position, so without this the reference provider is never
+     * even consulted for it.
+     *
+     * Ordered so the cheap PSI check runs first and the (cached) project lookup
+     * only happens for scalars that are actually a mapping or sequence value.
+     */
+    private fun isConventionKey(scalar: YAMLScalar): Boolean {
+        val key = PlayStructure.owningKeyValue(scalar)?.keyText?.trim()
+            ?: PlayStructure.owningSequenceKey(scalar)
+            ?: return false
+        val file = PlayStructure.sourceFile(scalar) ?: return false
+        return GroupKeyConvention.getInstance(scalar.project).isGroupValued(key, file)
+    }
 }

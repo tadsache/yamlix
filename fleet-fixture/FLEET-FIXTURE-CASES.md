@@ -90,6 +90,20 @@ entry in the file has none.
 `vars: { hostgroup: containers }`. `containers` there must resolve as a group
 reference too, not just a `hosts:` value.
 
+Nothing in Ansible's syntax marks it as one — it is a plain string assigned to
+a plain variable. What marks it is `shared/noop.yml`'s
+`hosts: "{{ hostgroup | default('all') }}"`: whatever a `hosts:` expression
+interpolates is a group-valued key *in this project*. So the key is discovered
+from the playbooks rather than hard-coded or configured, and a project using
+`target_group` gets the same treatment for free.
+
+The negative case is the point of the design. `hostgroup:` is also an ordinary
+field of `theforeman.foreman`'s modules; a project that never templates
+`hosts:` yields no keys at all and is left completely alone. References
+inferred this way also never report as unresolved, so a value that names no
+group is never flagged as an error. See `GroupKeyConventionTest` and
+`GroupKeyConventionAbsentTest`.
+
 ### F8 — same variable name, two unrelated roles, never merged
 
 Both `container_monitoring_agent` and `legacy_monitoring_agent` define
@@ -121,3 +135,79 @@ twice.
 that single host — the narrowest possible scope, and it must still win over
 `group_vars/all.yml` for `b-host-03` specifically while every other host in
 `env-b` keeps the root default.
+
+### F12 — a `hosts:` pattern the plugin cannot model must not narrow anything
+
+`site-probe-glob.yml` uses `hosts: "web_ap*"` and `site-probe-local.yml` uses
+`hosts: localhost`. Neither is a literal group or host name in these
+inventories, so the set of hosts they match is unknown.
+
+F5 established that a pattern which *is* understood restricts a role's
+variables to the hosts it targets. The other half matters just as much:
+"unknown" must mean unrestricted, never the empty set. An empty set removes
+the role's defaults, `vars:` and `vars_files:` from every host, and a variable
+that resolves nowhere is indistinguishable — in the popup and in "Choose
+Declaration" — from one that was never defined.
+
+`probe_setting`, defined only in `roles/pattern_probe_agent/defaults/main.yml`,
+must still resolve under both playbooks. `agent_image` under
+`site-container-mon.yml` must still *not* reach `a-host-02`, so the F5
+restriction is not simply switched off.
+
+### F13 — one role, two plays, disjoint host patterns
+
+`site-probe-multiplay.yml` runs `pattern_probe_agent` twice: once on
+`hosts: containers`, once on `hosts: web_app`. The role's defaults are in
+scope for the union of both plays' hosts.
+
+Scoping from a single play — whichever encloses the caret, or the first one in
+the file — makes the role's variables vanish for every host the *other* play
+targets. Multi-play playbooks are the norm, so this is not an edge case.
+
+### F14 — playbook-adjacent `group_vars` outranks the inventory's own
+
+Ansible loads `group_vars/` from two places: beside the inventory source and
+beside the playbook, and orders them `inventory group_vars/all` <
+`playbook group_vars/all` < `inventory group_vars/*` < `playbook group_vars/*`.
+
+`playbooks/group_vars/all.yml` and `inventories/env-a/group_vars/all.yml` both
+define `probe_adjacent`. For `playbooks/site-probe-adjacent.yml` — the one
+playbook that actually sits beside the former — the playbook-adjacent value
+wins. For a root-level playbook it is not in scope at all, and the inventory's
+own value wins instead.
+
+Both files are `all.yml` at the same precedence rank, so without modelling
+adjacency the winner falls out of an alphabetical tie between two identically
+named files: a wrong answer rather than merely an unhelpful one.
+
+### F15 — a literal group absent from an inventory means "no hosts", not "unknown"
+
+`site-legacy-mon.yml` targets `hosts: legacy_hosts`, a group that exists only
+in `env-b`. F12 says a pattern the plugin cannot evaluate must not narrow
+anything — but a literal name that this inventory simply does not have *has*
+been evaluated. The play does not run there, and saying so is the answer, not
+a guess.
+
+Conflating the two leaked `legacy_monitoring_agent`'s defaults onto every host
+of `env-a`, `env-c` and `env-d`: the role was reported as winning nearly
+fleet-wide when Ansible runs it on exactly one host.
+
+`localhost` is the deliberate exception — Ansible supplies it implicitly, so a
+`hosts: localhost` play really does run even though the name is in no
+inventory, and it returns "cannot be evaluated" instead.
+
+### F16 — an unrelated role's same-named variable is not a candidate at all
+
+Ansible's variable namespace is global and the index is keyed by name, so
+`agent_image` in `container_monitoring_agent` and in `legacy_monitoring_agent`
+collide. From inside either role's task file, only that role's own definition
+is offered.
+
+The other one used to be listed last, marked out of scope. That is noise: the
+two roles never share a play, so it can never be the declaration of the symbol
+under the caret, and every reader had to rule it out by hand.
+
+Flow-sensitive scopes (`include_vars`, `set_fact`, `register`) are exempt and
+stay in the list when out of scope, because there the reason is *position* —
+"it is set in this very play, just after where you are" — which is frequently
+the answer to why a value is not what was expected.

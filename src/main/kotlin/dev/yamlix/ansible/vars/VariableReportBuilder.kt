@@ -6,6 +6,7 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiManager
+import dev.yamlix.ansible.inventory.InventoryGraph
 import dev.yamlix.ansible.inventory.InventoryGraphService
 import dev.yamlix.ansible.layout.AnsibleLayoutService
 import dev.yamlix.ansible.psi.PlayStructure
@@ -26,14 +27,20 @@ class VariableReportBuilder(private val project: Project) {
         fun getInstance(project: Project): VariableReportBuilder = project.service()
 
         /**
-         * Guards against a huge dynamic inventory freezing the popup.
+         * Guards against a pathological inventory freezing the popup.
          *
          * Real inventories seen in production (NAVIGATION-CASES.md's fixtures
          * are tiny by comparison) run into the low hundreds of hosts — a
          * fab-wide `production` inventory alone can have 200+. The cap only
-         * needs to catch pathological/dynamic inventories (cloud auto-scaling
-         * groups etc.) that could have thousands; it must not silently drop
-         * hosts that are a completely normal size for a static inventory file.
+         * needs to catch dynamic inventories (cloud auto-scaling groups etc.)
+         * that could have thousands; it must not silently drop hosts that are
+         * a completely normal size for a static inventory file.
+         *
+         * Since [VariableResolutionService.resolveAcross] resolves once per
+         * class of equivalent hosts rather than once per host, the marginal
+         * cost of a host here is a group-membership lookup, not a resolution.
+         * The cap is therefore about bounding the work of *listing* hosts, not
+         * about bounding resolution.
          */
         const val MAX_HOSTS_PER_INVENTORY = 750
 
@@ -46,6 +53,22 @@ class VariableReportBuilder(private val project: Project) {
          */
         private const val MAX_HOSTS_NAMED_IN_LABEL = 2
 
+        /**
+         * How many inventories to name before folding the rest into "+N more".
+         * A site winning on one host of each of sixteen inventories otherwise
+         * produced sixteen fragments on a single row.
+         */
+        private const val MAX_INVENTORIES_NAMED_IN_LABEL = 3
+
+
+        /**
+         * Scopes whose visibility is decided by the play's `hosts:` pattern,
+         * and which therefore win on exactly some group's hosts.
+         */
+        private val PATTERN_SCOPED = setOf(
+            VarScope.ROLE_DEFAULTS, VarScope.ROLE_VARS, VarScope.ROLE_PARAM,
+            VarScope.PLAY_VARS, VarScope.VARS_FILE,
+        )
 
         /** Expressions whose value can never be known without running Ansible. */
         private val RUNTIME_ONLY = listOf("hostvars", "lookup(", "query(", "vault", "ansible_facts")
@@ -83,11 +106,9 @@ class VariableReportBuilder(private val project: Project) {
 
             // Hosts that resolve identically collapse into one row.
             val grouped = LinkedHashMap<String, Pair<VarResolution, MutableList<String>>>()
+            val resolutions = resolver.resolveAcross(name, root, hosts, playbook, position)
             for (host in hosts) {
-                val resolution = resolver.resolve(
-                    name,
-                    ResolutionContext(host, root, playbook, position),
-                )
+                val resolution = resolutions[host] ?: continue
                 resolution.caveats.forEach(caveats::add)
                 val key = signature(resolution)
                 grouped.getOrPut(key) { resolution to ArrayList() }.second += host
@@ -171,6 +192,7 @@ class VariableReportBuilder(private val project: Project) {
             val entry = into.getOrPut(key(site)) { LinkedHashMap() }
                 .getOrPut(inventory) { WinRecord() }
             entry.hosts += host
+            entry.scope = site.scope
             // A group_vars site applies by group membership, not by which
             // individual hosts happen to be in it — naming the group is both
             // more precise and shorter than enumerating (or capping) hosts.
@@ -190,14 +212,20 @@ class VariableReportBuilder(private val project: Project) {
         val resolvedPlaybooks = playbooksFor(file)
         val playbooks: List<VirtualFile?> = if (resolvedPlaybooks.isEmpty()) listOf(null) else resolvedPlaybooks
         val inventoryRoots = layout.inventoryRoots(file)
+        // Host lists depend only on the inventory, not on the playbook being
+        // swept — computing them inside the playbook loop re-sorted every
+        // inventory once per playbook.
+        val hostsByRoot = inventoryRoots.associateWith { root ->
+            cappedHosts(graphs.graphFor(root).hosts.sorted(), contextHost)
+        }
+        hostsByRoot.forEach { (root, hosts) -> hostCount[root.name] = hosts.size }
+
         for (playbook in playbooks) {
             for (root in inventoryRoots) {
-                val hosts = cappedHosts(graphs.graphFor(root).hosts.sorted(), contextHost)
-                hostCount[root.name] = hosts.size
+                val hosts = hostsByRoot.getValue(root)
+                val resolutions = resolver.resolveAcross(name, root, hosts, playbook, position)
                 for (host in hosts) {
-                    val resolution = resolver.resolve(
-                        name, ResolutionContext(host, root, playbook, position),
-                    )
+                    val resolution = resolutions[host] ?: continue
                     resolution.sites.forEach { inScope += key(it) }
 
                     val top = resolution.conditionalWinner
@@ -220,45 +248,60 @@ class VariableReportBuilder(private val project: Project) {
         }
         val allInventoryNames = inventoryRoots.map { it.name }.toSet()
 
+        val graphsByInventory = inventoryRoots.associate { it.name to graphs.graphFor(it) }
+
         fun labels(source: Map<String, WinRecord>?): List<String> {
             val entries = source.orEmpty()
             if (entries.isEmpty()) return emptyList()
 
-            // A site that applies identically across literally every inventory
-            // the project has (`group_vars/all.yml`, most commonly) otherwise
-            // prints one line per inventory — "WINS on production; staging;
-            // development; test; ..." for all sixteen of them — which is
-            // exactly the wall of text a reader is trying to avoid. Collapse
-            // it to a single summary line instead.
-            //
-            // Restricted to sites that carry a real, consistent group
-            // qualifier (i.e. an actual `group_vars` site): a host-based site
-            // that merely *happens* to win everywhere in a small, two- or
-            // three-inventory project is still worth spelling out, since
-            // there is no "this project" wall of text to avoid there.
-            if (allInventoryNames.isNotEmpty() && entries.keys == allInventoryNames) {
-                val groupNames = entries.values.map { it.groupName }.distinct()
-                val group = groupNames.singleOrNull()
-                if (group != null) return listOf("all inventories ($group)")
+            // The group each entry is really about: the site's own qualifier
+            // when it has one, otherwise a group whose membership is exactly
+            // the set of hosts won. See [groupNamed].
+            val groups = entries.mapValues { (inventory, entry) ->
+                entry.groupName ?: groupNamed(graphsByInventory[inventory], entry)
             }
 
-            return entries.map { (inventory, entry) ->
-                val group = entry.groupName
+            // Collapsing only pays for itself once naming the inventories would
+            // actually be a wall of text. In a two- or three-inventory project
+            // "stag; prod" is both shorter and more informative than "all
+            // inventories", so leave it alone.
+            val everyInventory = allInventoryNames.size > MAX_INVENTORIES_NAMED_IN_LABEL &&
+                entries.keys == allInventoryNames
+            fun coversWholly(inventory: String, entry: WinRecord) =
+                entry.hosts.distinct().size == hostCount[inventory]
+
+            if (everyInventory) {
+                // Consistency is decided on the raw group name — a site that is
+                // `all` in every inventory is exactly the case this collapses —
+                // and only the *display* drops the uninformative `all`.
+                val raw = groups.values.distinct()
+                if (raw.size == 1 && raw.single() != null) {
+                    return listOf(labelWithGroup("all inventories", qualifying(raw.single())))
+                }
+                // Not a group site, but it does win on every host of every
+                // inventory — `may win on env-a; env-b; env-c; env-d` said the
+                // same thing four times.
+                if (entries.all { (inventory, entry) -> coversWholly(inventory, entry) }) {
+                    return listOf("all inventories")
+                }
+            }
+
+            val labels = entries.map { (inventory, entry) ->
+                val group = qualifying(groups[inventory])
                 val distinctHosts = entry.hosts.distinct()
                 when {
-                    group != null -> "$inventory ($group)"
-                    distinctHosts.size == hostCount[inventory] -> inventory
-                    else -> {
-                        val shown = distinctHosts.take(MAX_HOSTS_NAMED_IN_LABEL)
-                        val rest = distinctHosts.size - shown.size
-                        val names = if (rest > 0) {
-                            "${shown.joinToString(", ")}, +$rest more"
-                        } else {
-                            shown.joinToString(", ")
-                        }
-                        "$inventory ($names)"
-                    }
+                    group != null -> labelWithGroup(inventory, group)
+                    coversWholly(inventory, entry) -> inventory
+                    else -> "$inventory (${capped(distinctHosts, MAX_HOSTS_NAMED_IN_LABEL)})"
                 }
+            }
+            // The per-host cap alone does not bound this: a role that wins on
+            // one host in each of sixteen inventories produced sixteen
+            // parenthesised fragments on one line.
+            return if (labels.size > MAX_INVENTORIES_NAMED_IN_LABEL) {
+                listOf(capped(labels, MAX_INVENTORIES_NAMED_IN_LABEL, separator = "; "))
+            } else {
+                labels
             }
         }
 
@@ -277,6 +320,64 @@ class VariableReportBuilder(private val project: Project) {
     private class WinRecord {
         val hosts = ArrayList<String>()
         var groupName: String? = null
+        var scope: VarScope? = null
+    }
+
+    /**
+     * The group worth naming in a label, or null.
+     *
+     * `all` is never worth naming: it is the group every host is in, so it
+     * says nothing a reader did not already assume, and the site it comes from
+     * is invariably a file literally called `all.yml` — which the row already
+     * shows. Spelling it out produced `group_vars/all[all] … WINS on env-a
+     * (all)`, the same word three times in one line.
+     */
+    private fun qualifying(group: String?): String? =
+        group?.takeIf { it != InventoryGraph.ALL }
+
+    /**
+     * The inventory group a site's win is really describing, when its own
+     * scope does not name one.
+     *
+     * A role's variables are scoped by the play's `hosts:` pattern, so they win
+     * on precisely the hosts of some group — but the *site* is role defaults,
+     * which carries a role name, not a group. Labelling it by hosts produced
+     * `env-a (a-host-01); env-b (b-host-01); env-c (c-host-07); +1 more` for
+     * what is simply "the containers group, everywhere".
+     *
+     * The group is recovered from the data rather than threaded down from the
+     * play: a group whose membership is *exactly* the set of hosts won is a
+     * true description of that set, whatever put it there. Ambiguity — two
+     * groups with identical membership — falls back to naming the hosts rather
+     * than picking one and being confidently wrong.
+     */
+    private fun groupNamed(graph: InventoryGraph?, record: WinRecord): String? {
+        if (graph == null) return null
+        // Only for sites the play's `hosts:` pattern is what scoped. A
+        // `host_vars` file wins because of the host and nothing else, so
+        // naming a group would be false even when the sets coincide — and they
+        // do coincide: a one-host group has the same membership as that host's
+        // own `host_vars`, which labelled a per-host override `stag (canary)`.
+        if (record.scope !in PATTERN_SCOPED) return null
+        val hosts = record.hosts.toSet()
+        if (hosts.isEmpty()) return null
+        return graph.groups.keys
+            .filter { it != InventoryGraph.ALL && graph.hostsInGroup(it) == hosts }
+            .singleOrNull()
+    }
+
+    private fun labelWithGroup(scope: String, group: String?): String =
+        if (group == null) scope else "$scope ($group)"
+
+    /** [items], with everything past [limit] folded into a "+N more" tail. */
+    private fun capped(items: List<String>, limit: Int, separator: String = ", "): String {
+        val shown = items.take(limit)
+        val rest = items.size - shown.size
+        return if (rest > 0) {
+            "${shown.joinToString(separator)}$separator+$rest more"
+        } else {
+            shown.joinToString(separator)
+        }
     }
 
     private fun key(site: VarSite): String = "${site.file.path}#${site.offset}"
@@ -285,10 +386,10 @@ class VariableReportBuilder(private val project: Project) {
      * The host implied by [file] itself, when it *is* a `host_vars` file.
      *
      * A large inventory truncates its host sweep to [MAX_HOSTS_PER_INVENTORY]
-     * hosts for performance (NAVIGATION-CASES.md's freeze-guard), sorted
-     * alphabetically. That silently drops any host whose name sorts past the
-     * cutoff — which, in a several-hundred-host production inventory, is most
-     * of them. If the position being resolved lives inside that very host's
+     * hosts (NAVIGATION-CASES.md's freeze-guard), sorted alphabetically. That
+     * silently drops any host whose name sorts past the cutoff — which, in a
+     * several-thousand-host dynamic inventory, is most of them. If the
+     * position being resolved lives inside that very host's
      * `host_vars` file, the cap must not be allowed to exclude it: the user is
      * looking directly at that host's variables, not doing a project-wide
      * sweep.

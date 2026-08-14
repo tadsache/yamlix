@@ -44,6 +44,11 @@ private class AnsibleReferenceProvider : PsiReferenceProvider() {
             return PsiReference.EMPTY_ARRAY
         }
         val kind = AnsiblePatterns.classify(scalar)
+            // Ansible syntax does not mark this scalar, but the project's own
+            // playbooks may — `hostgroup: containers` under an
+            // `import_playbook`'s `vars:`, consumed by `hosts: "{{ hostgroup }}"`
+            // elsewhere. See [GroupKeyConvention].
+            ?: conventionGroupReference(scalar, virtualFile)?.let { return arrayOf(it) }
             // N13: a scalar in no special position may still contain
             // `{{ variable }}` references. Only offered when the scalar is not
             // already a role/file reference, so reference ranges never overlap.
@@ -68,5 +73,29 @@ private class AnsibleReferenceProvider : PsiReferenceProvider() {
             AnsibleRefKind.GROUP -> AnsibleGroupReference(scalar, range)
         }
         return arrayOf(reference)
+    }
+
+    /**
+     * A group reference for a key this project uses to carry a group name.
+     *
+     * Returns null — not an empty array — when the convention does not apply,
+     * so the caller falls through to the `{{ variable }}` handling. A scalar
+     * like `hostgroup: containers` holds no Jinja, so nothing is lost either
+     * way; a project not using the convention behaves exactly as before.
+     */
+    private fun conventionGroupReference(
+        scalar: YAMLScalar,
+        virtualFile: com.intellij.openapi.vfs.VirtualFile,
+    ): PsiReference? {
+        val key = PlayStructure.owningKeyValue(scalar)?.keyText?.trim()
+            ?: PlayStructure.owningSequenceKey(scalar)
+            ?: return null
+        if (!GroupKeyConvention.getInstance(scalar.project).isGroupValued(key, virtualFile)) {
+            return null
+        }
+        val range = AnsibleReferenceBase.valueRange(scalar)
+        if (range.isEmpty || scalar.text.contains("{{")) return null
+        // Inferred, not syntactic: never report it as an unresolved reference.
+        return AnsibleGroupReference(scalar, range, reportWhenUnresolved = false)
     }
 }

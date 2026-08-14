@@ -3,7 +3,11 @@
 # `site-*.yml` in this project starts this way — a `firstPlay()` that just
 # grabs the first entry in the file would pick this no-op instead of the
 # actual play with `roles:`, silently disabling role scoping.
-- hosts: all
+#
+# NAV: F7 — this `hosts:` is what makes `hostgroup` a group-valued key for the
+# whole project. Nothing in Ansible's syntax says so; it is discovered from
+# this line. See GroupKeyConvention.
+- hosts: "{{ hostgroup | default('all') }}"
   tasks:
     - name: noop
       ansible.builtin.debug:

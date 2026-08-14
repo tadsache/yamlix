@@ -23,9 +23,12 @@ import java.util.concurrent.ConcurrentHashMap
  * and the candidates are ordered **winner first** (descending precedence).
  *
  * Candidates are ordered by what applies **at the caret**: sites that win here
- * first, then tied candidates, then sites that are in scope but lose, then sites
- * that exist elsewhere in the project but do not apply at this position at all.
- * Nothing is hidden — an out-of-scope definition is still reachable, just last.
+ * first, then tied candidates, then sites that are in scope but lose, and last
+ * the flow-sensitive sites that have not run yet at this position.
+ *
+ * Definitions that do not apply here and never could — a same-named variable in
+ * an unrelated role, reached only because Ansible's namespace is global — are
+ * left out entirely rather than listed last. See [computeTargets].
  *
  * Every inventory contributes, because the IDE has no "current host". Which
  * inventory a row wins on is stated on the row itself.
@@ -61,6 +64,8 @@ class AnsibleVariableReference(
             val path: String,
             val offset: Int,
             val target: PsiElement,
+            /** True when position, not relevance, is why it does not apply. */
+            val flowSensitive: Boolean,
         )
 
         val candidates = ArrayList<Candidate>()
@@ -95,11 +100,11 @@ class AnsibleVariableReference(
                             winsOn.isNotEmpty() -> 0
                             mayWinOn.isNotEmpty() -> 1
                             inScope -> 2
-                            else -> 3
+                            else -> OUT_OF_SCOPE
                         }
                         candidates += Candidate(
                             priority, definition.scope.rank, file.canonicalPath ?: file.path,
-                            definition.offset, target,
+                            definition.offset, target, definition.scope.isFlowSensitive,
                         )
                     }
                 }
@@ -115,7 +120,27 @@ class AnsibleVariableReference(
             if (file != null) return MagicVariableOrigins.targets(name, file, project)
         }
 
-        return candidates
+        // Drop definitions that do not apply here *and* never could.
+        //
+        // A variable name is global in Ansible, so the index happily returns a
+        // same-named definition from a role in a completely unrelated play. It
+        // is in the list only because the names collide — it is not a candidate
+        // declaration of the thing under the caret, and listing it makes the
+        // reader rule it out by hand every time.
+        //
+        // Flow-sensitive scopes are the exception and stay: a `set_fact`
+        // further down this very play *is* this variable, and "it is set here,
+        // just not yet where you are" is frequently the answer to why the value
+        // is not what was expected. Position versus relevance — which is
+        // exactly what `VarScope.isFlowSensitive` marks.
+        //
+        // Falls back to the full list when filtering would empty it: "no
+        // declaration found" is a worse answer than an unrelated one.
+        val relevant = candidates
+            .filter { it.priority != OUT_OF_SCOPE || it.flowSensitive }
+            .ifEmpty { candidates }
+
+        return relevant
             .distinctBy { Triple(it.path, it.offset, it.rank) }
             .sortedWith(
                 // Ascending rank, not descending: when several sites all WIN
@@ -140,6 +165,9 @@ class AnsibleVariableReference(
 
     companion object {
         private val KEY = Key.create<CachedValue<ConcurrentHashMap<TextRange, List<PsiElement>>>>("yamlix.ref.variable")
+
+        /** Sort priority for a site that does not apply at the caret at all. */
+        private const val OUT_OF_SCOPE = 3
 
         /** Identifiers that are Jinja syntax, not Ansible variables. */
         private val KEYWORDS = setOf(

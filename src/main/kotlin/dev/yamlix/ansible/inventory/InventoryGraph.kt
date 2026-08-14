@@ -1,5 +1,7 @@
 package dev.yamlix.ansible.inventory
 
+import java.util.concurrent.ConcurrentHashMap
+
 /**
  * One inventory's host/group topology.
  *
@@ -35,19 +37,36 @@ class InventoryGraph(
 ) {
     val hosts: Set<String> get() = hostGroups.keys
 
+    // A graph is immutable and cached per inventory, so these are computed at
+    // most once per host/group for its whole lifetime. Resolution sweeps a
+    // fleet-sized inventory once per playbook, and re-sorting every host's
+    // group list on each pass was the dominant cost of that sweep.
+    private val groupsCache = ConcurrentHashMap<String, List<InventoryGroup>>()
+    private val signatureCache = ConcurrentHashMap<String, String>()
+    private val hostsInGroupCache = ConcurrentHashMap<String, Set<String>>()
+
     /**
      * Every group a host belongs to, ordered exactly as Ansible merges them:
      * `(depth ASC, priority ASC, name ASC)`, later entries overriding earlier.
      */
     fun groupsForHost(host: String): List<InventoryGroup> =
-        (hostGroups[host] ?: emptySet())
-            .mapNotNull { groups[it] }
-            .sortedWith(
-                compareBy({ it.depth }, { it.priority }, { it.name }),
-            )
+        groupsCache.getOrPut(host) {
+            (hostGroups[host] ?: emptySet())
+                .mapNotNull { groups[it] }
+                .sortedWith(
+                    compareBy({ it.depth }, { it.priority }, { it.name }),
+                )
+        }
+
+    /**
+     * A stable string identifying a host's group membership *and* its merge
+     * order — two hosts sharing one are interchangeable to variable resolution.
+     */
+    fun groupSignature(host: String): String =
+        signatureCache.getOrPut(host) { groupsForHost(host).joinToString(",") { it.name } }
 
     fun hostsInGroup(group: String): Set<String> =
-        hostGroups.filterValues { group in it }.keys
+        hostsInGroupCache.getOrPut(group) { hostGroups.filterValues { group in it }.keys }
 
     companion object {
         const val ALL = "all"

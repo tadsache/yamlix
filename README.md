@@ -8,7 +8,7 @@ It reuses the platform's YAML PSI. It registers no file type, does not claim
 
 ```
 IntelliJ IDEA 2025.2+ (sinceBuild 252, no upper bound)   Kotlin · Gradle 9 · IJPGP 2.x
-86 tests · IntelliJ Plugin Verifier: Compatible
+97 tests · IntelliJ Plugin Verifier: Compatible
 ```
 
 ---
@@ -28,7 +28,8 @@ Ctrl/⌘+Click resolves the things Ansible resolves at runtime:
 | `vars_files:` / `include_vars:` | including fact-templated filenames — **all** candidates, never one guess |
 | `template:` / `copy:` `src:` | `templates/`, then `files/`, then the playbook dir |
 | `notify:` | the handler with that `name:` or `listen:` |
-| `hosts:` | the group in the inventory source and its `group_vars` file |
+| `hosts:` | the group in the inventory source (INI or YAML) and its `group_vars` file |
+| `hostgroup:`-style keys | any key this project's own `hosts:` expressions interpolate |
 | `{{ variable }}` | every definition site, ordered by what applies at the caret |
 
 **Find Usages** works in reverse: from an `app_port:` key in `host_vars`,
@@ -48,18 +49,24 @@ and where in the play you are. The plugin models that properly.
 applies at the caret:
 
 ```
-set_fact = 8500        roles/app/tasks/main.yml    · rank 20 · WINS on stag
-include_vars = 8100    roles/app/vars/Darwin.yml   · rank 19 · may win on prod
-include_vars = 8200    roles/app/vars/RedHat.yml   · rank 19 · may win on prod
-role vars[app] = 8090  roles/app/vars/main.yml     · rank 16 · in scope
-vars_files = 8070      vars/common.yml             · rank 15 · in scope
-host_vars[stag-web-1]  inventories/stag/host_vars/… · rank 10 · in scope
-…
+8500     stag  ·  roles/app/tasks/main.yml
+8100     may win on prod  ·  roles/app/vars/Darwin.yml
+8200     may win on prod  ·  roles/app/vars/RedHat.yml
+8090     overridden  ·  roles/app/vars/main.yml
+8070     overridden  ·  vars/common.yml
+6        overridden  ·  inventories/stag/host_vars/stag-web-1.yml
 ```
+
+The value leads because it is the field that differs between rows; where it
+applies and which file it lives in qualify it. Nothing restates what the path
+already says — no scope prefix, no group name repeated from the filename, no
+precedence number the list is already sorted by.
 
 Move the caret four lines earlier — before the `set_fact` runs — and the same
 variable produces a different list, with the `set_fact` marked *not in scope
-here*.
+here*. A same-named variable belonging to an unrelated role is not listed at
+all: Ansible's namespace is global, so the index offers it, but it can never
+be the declaration of the symbol under the caret.
 
 **Quick Documentation** (F1 on macOS, Ctrl+Q elsewhere) renders the effective
 value per inventory and host:
@@ -124,10 +131,19 @@ reports from regressing: a project-root `group_vars/all.yml` sibling to
 `inventories/`, plain-INI inventories with no file extension, a role's
 `hosts:` pattern matching a sliver of a much bigger inventory, playbooks that
 open with an `import_playbook` step before their real play,
-`include_vars: "{{ item }}"` + `with_first_found:`, and a role reachable
-through a symlinked directory. Every identifier in it is invented — no real
+`include_vars: "{{ item }}"` + `with_first_found:`, a role reachable through a
+symlinked directory, host patterns the plugin cannot model (`web*`,
+`localhost`), one role shared by two plays with different `hosts:`, and
+playbook-adjacent `group_vars/`. Every identifier in it is invented — no real
 variable name, hostname, or URL. Same integrity guarantee as the first
 fixture (`FleetFixtureIntegrityTest`), same "byte-identical copy" rule.
+
+`ScaleBenchmarkTest` generates a fleet-sized project — 16 inventories, 300
+hosts each, 25 playbooks, 60 roles — and asserts that resolving a variable
+across it stays well under a second. Variable resolution sweeps every host of
+every inventory for every applicable playbook, so it is the one part of the
+plugin where a straightforward implementation is quadratic enough to freeze
+the UI on a real project.
 
 ---
 
@@ -136,7 +152,7 @@ fixture (`FleetFixtureIntegrityTest`), same "byte-identical copy" rule.
 Requires a JDK 17+ to run Gradle; the build provisions a JDK 21 toolchain.
 
 ```bash
-./gradlew test           # 76 tests
+./gradlew test           # 97 tests
 ./gradlew verifyPlugin   # IntelliJ Plugin Verifier
 ./gradlew runIde         # sandbox IDE with the plugin loaded
 ./gradlew buildPlugin    # build/distributions/yamlix-<version>.zip
