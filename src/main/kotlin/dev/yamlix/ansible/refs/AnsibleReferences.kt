@@ -15,6 +15,7 @@ import com.intellij.psi.util.CachedValue
 import com.intellij.psi.util.CachedValueProvider
 import com.intellij.psi.util.CachedValuesManager
 import com.intellij.psi.util.PsiModificationTracker
+import dev.yamlix.ansible.inventory.InventoryGraphService
 import dev.yamlix.ansible.layout.AnsibleLayoutService
 import dev.yamlix.ansible.layout.AnsibleLayoutTracker
 import dev.yamlix.ansible.psi.PlayStructure
@@ -179,24 +180,51 @@ class AnsibleHandlerReference(element: YAMLScalar, range: TextRange) :
 }
 
 /** N12 — a `hosts:` pattern naming an inventory group. */
-class AnsibleGroupReference(element: YAMLScalar, range: TextRange) :
-    AnsibleReferenceBase(element, range, KEY) {
+class AnsibleGroupReference(
+    element: YAMLScalar,
+    range: TextRange,
+    /**
+     * False for a reference inferred from a project convention rather than
+     * from Ansible syntax — see [GroupKeyConvention]. Such a key is an
+     * ordinary variable that this project *happens* to use for group names, so
+     * a value that names no group is not a defect worth flagging.
+     */
+    override val reportWhenUnresolved: Boolean = true,
+) : AnsibleReferenceBase(element, range, KEY) {
 
     override fun computeTargets(): List<PsiElement> {
         val file = PlayStructure.sourceFile(element) ?: return emptyList()
         return AnsibleTargets.groupDefinitions(refText.trim(), file, element.project)
     }
 
+    /**
+     * Every group and host of every inventory.
+     *
+     * Taken from the parsed [InventoryGraph] rather than by listing
+     * `group_vars/` filenames: the graph already holds every group from every
+     * inventory source — INI and YAML alike, including groups that only ever
+     * appear as a child under `[web:children]` — whereas a `group_vars` listing
+     * misses every group that has no vars file of its own, which on an
+     * INI-inventory project can be all of them.
+     */
     override fun computeVariants(): List<LookupElement> {
         val file = PlayStructure.sourceFile(element) ?: return emptyList()
         val layout = AnsibleLayoutService.getInstance(element.project)
-        val names = LinkedHashSet<String>()
+        val graphs = InventoryGraphService.getInstance(element.project)
+
+        val groups = LinkedHashSet<String>()
+        val hosts = LinkedHashSet<String>()
         for (root in layout.inventoryRoots(file)) {
-            root.findChild("group_vars")?.children
-                ?.filter { !it.isDirectory }
-                ?.forEach { names += it.nameWithoutExtension }
+            val graph = graphs.graphFor(root)
+            groups += graph.groups.keys
+            hosts += graph.hosts
         }
-        return names.map { LookupElementBuilder.create(it).withIcon(com.intellij.icons.AllIcons.Nodes.Folder) }
+        // `hosts:` takes either; the icon is what tells them apart.
+        return groups.map {
+            LookupElementBuilder.create(it).withIcon(com.intellij.icons.AllIcons.Nodes.Folder)
+        } + (hosts - groups).map {
+            LookupElementBuilder.create(it).withIcon(com.intellij.icons.AllIcons.Nodes.Servlet)
+        }
     }
 
     companion object {

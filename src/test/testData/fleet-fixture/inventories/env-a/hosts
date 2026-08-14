@@ -1,0 +1,8 @@
+# Small environment. One host in the "containers" group, mirroring the real
+# project's pattern of a tiny cross-cutting group inside every environment.
+[containers]
+a-host-01
+
+[web_app]
+a-host-02
+a-host-03

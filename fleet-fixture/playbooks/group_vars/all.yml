@@ -1,0 +1,4 @@
+---
+# Playbook-adjacent group_vars: applies only to playbooks in this directory,
+# and outranks the inventory's own group_vars/all.yml for them.
+probe_adjacent: from-playbook-group-vars

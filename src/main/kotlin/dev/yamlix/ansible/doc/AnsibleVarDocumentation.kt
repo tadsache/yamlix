@@ -111,7 +111,7 @@ object AnsibleVarDocumentation {
             html.append(DocumentationMarkup.SECTION_SEPARATOR)
 
             if (!row.coversWholeInventory) {
-                html.append(grey(escape(row.hosts.joinToString(", ")))).append("<br>")
+                html.append(grey(escape(hostsLabel(row.hosts)))).append("<br>")
             }
             html.append(value(row))
 
@@ -163,8 +163,21 @@ object AnsibleVarDocumentation {
     private fun relative(file: VirtualFile, base: VirtualFile?): String =
         base?.let { VfsUtilCore.getRelativePath(file, it) } ?: file.name
 
+    /**
+     * A row that does not cover a whole inventory names the hosts it does
+     * apply to. Spelling out all of them for a large group turns the popup
+     * into a wall of hostnames, so only the first few are named.
+     */
+    private fun hostsLabel(hosts: List<String>): String {
+        val shown = hosts.take(MAX_HOSTS_NAMED)
+        val rest = hosts.size - shown.size
+        return if (rest > 0) "${shown.joinToString(", ")}, +$rest more" else shown.joinToString(", ")
+    }
+
     private fun grey(html: String) =
         "<span class='${DocumentationMarkup.CLASS_GRAYED}'>$html</span>"
 
     private fun escape(text: String): String = StringUtil.escapeXmlEntities(text)
+
+    private const val MAX_HOSTS_NAMED = 2
 }

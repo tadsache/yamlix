@@ -97,14 +97,14 @@ class VariableNavigationTest : AnsibleFixtureTestCase() {
         val leading = rows.take(2).sorted()
         assertEquals(
             listOf(
-                "include_vars = 8100 | roles/app/vars/Darwin.yml  ·  rank 19  ·  may win on stag; prod",
-                "include_vars = 8200 | roles/app/vars/RedHat.yml  ·  rank 19  ·  may win on stag; prod",
+                "8100 | may win on stag; prod  ·  roles/app/vars/Darwin.yml",
+                "8200 | may win on stag; prod  ·  roles/app/vars/RedHat.yml",
             ),
             leading,
         )
         assertTrue(
             "the set_fact has not run at line 11 and must say so: $rows",
-            rows.any { it.startsWith("set_fact = 8500") && it.endsWith("not in scope here") },
+            rows.any { it.startsWith("8500 |") && it.contains("not in scope here") },
         )
     }
 
@@ -114,23 +114,25 @@ class VariableNavigationTest : AnsibleFixtureTestCase() {
 
         assertEquals(
             "on stag the guarded set_fact now wins outright",
-            "set_fact = 8500 | roles/app/tasks/main.yml  ·  rank 20  ·  WINS on stag",
+            "8500 | stag  ·  roles/app/tasks/main.yml",
             rows.first(),
         )
         assertTrue(
             "on prod the guard is false, so the OS-family files may still win: $rows",
-            rows.any { it.startsWith("include_vars = 8100") && it.contains("may win on prod") },
+            rows.any { it.startsWith("8100 |") && it.contains("may win on prod") },
         )
     }
 
     /** Sites are ordered winner, then tied, then in-scope, then out-of-scope. */
     fun testOrderingIsWinnersThenScopeThenRank() {
         val rows = rows(variableReference("roles/app/tasks/configure.yml", 4, "app_port"))
-        fun statusOf(row: String) = when {
-            row.contains("WINS on") -> 0
-            row.contains("may win on") -> 1
-            row.endsWith("in scope") -> 2
-            else -> 3
+        fun statusOf(row: String) = when (val status = row.substringAfter("| ")) {
+            else -> when {
+                status.startsWith("not in scope here") -> 3
+                status.startsWith("overridden") -> 2
+                status.startsWith("may win on") -> 1
+                else -> 0
+            }
         }
         val statuses = rows.map(::statusOf)
         assertEquals("statuses must be non-decreasing: $rows", statuses.sorted(), statuses)
@@ -148,15 +150,15 @@ class VariableNavigationTest : AnsibleFixtureTestCase() {
         assertEquals("every site must produce a distinct row", rows.size, rows.toSet().size)
         assertEquals(
             listOf(
-                "host_vars[prod-web-1] = 16 | inventories/prod/host_vars/prod-web-1.yml  ·  rank 10  ·  WINS on prod (prod-web-1)",
-                "host_vars[stag-web-1] = 6 | inventories/stag/host_vars/stag-web-1.yml  ·  rank 10  ·  WINS on stag (stag-web-1)",
-                "group_vars[webservers] = 14 | inventories/prod/group_vars/webservers.yml  ·  rank 7  ·  WINS on prod (prod-web-2)",
-                "group_vars[webservers] = 4 | inventories/stag/group_vars/webservers.yml  ·  rank 7  ·  WINS on stag (stag-web-2)",
-                "group_vars[canary] = 5 | inventories/stag/group_vars/canary.yml  ·  rank 7  ·  in scope",
-                "group_vars[platform] = 3 | inventories/stag/group_vars/platform.yml  ·  rank 7  ·  in scope",
-                "group_vars/all[all] = 12 | inventories/prod/group_vars/all.yml  ·  rank 4  ·  in scope",
-                "group_vars/all[all] = 2 | inventories/stag/group_vars/all.yml  ·  rank 4  ·  in scope",
-                "role defaults[app] = 1 | roles/app/defaults/main.yml  ·  rank 2  ·  in scope",
+                "14 | prod (webservers)  ·  inventories/prod/group_vars/webservers.yml",
+                "4 | stag (webservers)  ·  inventories/stag/group_vars/webservers.yml",
+                "16 | prod (prod-web-1)  ·  inventories/prod/host_vars/prod-web-1.yml",
+                "6 | stag (stag-web-1)  ·  inventories/stag/host_vars/stag-web-1.yml",
+                "1 | overridden  ·  roles/app/defaults/main.yml",
+                "12 | overridden  ·  inventories/prod/group_vars/all.yml",
+                "2 | overridden  ·  inventories/stag/group_vars/all.yml",
+                "5 | overridden  ·  inventories/stag/group_vars/canary.yml",
+                "3 | overridden  ·  inventories/stag/group_vars/platform.yml",
             ),
             rows,
         )

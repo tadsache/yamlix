@@ -1,0 +1,4 @@
+---
+# Inventory-adjacent group_vars: the lower half of Ansible's group_vars/all
+# precedence pair.
+probe_adjacent: from-inventory-group-vars

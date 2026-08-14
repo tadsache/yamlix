@@ -1,0 +1,4 @@
+---
+- name: start legacy monitoring agent
+  ansible.builtin.debug:
+    msg: "start {{ agent_image }}"

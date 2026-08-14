@@ -3,9 +3,11 @@ package dev.yamlix.ansible.refs
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiElement
+import com.intellij.psi.PsiFile
 import com.intellij.psi.PsiManager
 import dev.yamlix.ansible.layout.AnsibleLayoutService
 import dev.yamlix.ansible.psi.PlayStructure
+import dev.yamlix.ansible.vars.VarFileRole
 import org.jetbrains.yaml.psi.YAMLFile
 import org.jetbrains.yaml.psi.YAMLKeyValue
 import org.jetbrains.yaml.psi.YAMLMapping
@@ -47,7 +49,7 @@ object AnsibleTargets {
 
         return layout.roleSearchPath(from)
             .mapNotNull { dir -> dir.findChild(trimmed)?.takeIf { it.isDirectory && isRoleDir(it) } }
-            .distinctBy { it.path }
+            .distinctBy { it.canonicalPath ?: it.path }
     }
 
     /** A directory is a role if it has at least one of the canonical subdirectories. */
@@ -133,7 +135,7 @@ object AnsibleTargets {
                 dirs += from.parent
             }
         }
-        return dirs.filterNotNull().filter { it.isDirectory }.distinctBy { it.path }
+        return dirs.filterNotNull().filter { it.isDirectory }.distinctBy { it.canonicalPath ?: it.path }
     }
 
     /**
@@ -157,7 +159,7 @@ object AnsibleTargets {
         if (!raw.contains("{{")) {
             return dirs.mapNotNull { dir ->
                 dir.findFileByRelativePath(raw)?.takeIf { !it.isDirectory }
-            }.distinctBy { it.path }
+            }.distinctBy { it.canonicalPath ?: it.path }
         }
 
         val dirPart = raw.substringBeforeLast('/', "")
@@ -228,7 +230,7 @@ object AnsibleTargets {
             }
         }
 
-        for (vf in handlerFiles.distinctBy { it.path }) {
+        for (vf in handlerFiles.distinctBy { it.canonicalPath ?: it.path }) {
             val psi = manager.findFile(vf) as? YAMLFile ?: continue
             for (task in topLevelTasks(psi)) {
                 val nameKv = task.getKeyValueByKey("name")
@@ -266,11 +268,25 @@ object AnsibleTargets {
         for (root in layout.inventoryRoots(from)) {
             for (child in root.children) {
                 if (child.isDirectory) continue
-                val psi = manager.findFile(child) as? YAMLFile ?: continue
-                collectGroupKeys(psi, name, out)
+                val psi = manager.findFile(child)
+                when {
+                    psi is YAMLFile -> collectGroupKeys(psi, name, out)
+                    VarFileRole.isIniInventory(child) && psi != null ->
+                        collectIniDeclarations(psi, name, root.name, out)
+                    else -> Unit
+                }
             }
             root.findChild("group_vars")?.children
                 ?.filter { !it.isDirectory && it.nameWithoutExtension == name }
+                ?.mapNotNull { manager.findFile(it) }
+                ?.let(out::addAll)
+            root.findChild("host_vars")?.children
+                ?.filter { file ->
+                    // `host_vars/<host>.yml` or `host_vars/<host>/*.yml`
+                    if (file.isDirectory) file.name == name
+                    else file.nameWithoutExtension == name
+                }
+                ?.flatMap { if (it.isDirectory) it.children.filter { c -> !c.isDirectory } else listOf(it) }
                 ?.mapNotNull { manager.findFile(it) }
                 ?.let(out::addAll)
         }
@@ -288,6 +304,57 @@ object AnsibleTargets {
             }
         }
         file.documents.mapNotNull { it.topLevelValue as? YAMLMapping }.forEach(::walk)
+    }
+
+    /**
+     * `[name]`, `[name:children]`, `[name:vars]` section headers, and bare
+     * host lines under a `hosts`-kind section, in an INI-format inventory.
+     *
+     * `hosts:` in a play is just as often a single host as a group, and this
+     * project's inventories are plain INI (`inventories/<env>/hosts`, no
+     * extension) rather than YAML — [AnsibleTargets.groupDefinitions]'s
+     * YAML-only walk above never matches anything in them.
+     *
+     * Targets are wrapped in [IniOffsetTarget] rather than resolved through
+     * `PsiFile.findElementAt`: an extension-less file like this gets treated
+     * as plain text, whose PSI is a single leaf spanning the whole file, so
+     * `findElementAt` would always navigate to offset 0 regardless of which
+     * line matched.
+     */
+    private fun collectIniDeclarations(
+        psiFile: PsiFile,
+        name: String,
+        inventoryName: String,
+        out: MutableList<PsiElement>,
+    ) {
+        val text = psiFile.text
+        var section = ""
+        var kind = "hosts"
+        var offset = 0
+        for (rawLine in text.split('\n')) {
+            val lineStart = offset
+            offset += rawLine.length + 1
+            val line = rawLine.substringBefore('#').substringBefore(';').trim()
+            if (line.isEmpty()) continue
+
+            if (line.startsWith('[') && line.endsWith(']')) {
+                val header = line.substring(1, line.length - 1).trim()
+                section = header.substringBefore(':')
+                kind = header.substringAfter(':', "hosts")
+                if (section == name) {
+                    val headerOffset = rawLine.indexOf(section, rawLine.indexOf('['))
+                    out += IniOffsetTarget(psiFile, lineStart + headerOffset, "Inventory: $inventoryName")
+                }
+                continue
+            }
+
+            if (kind != "hosts") continue
+            val host = line.split(Regex("\\s+")).firstOrNull() ?: continue
+            if (host == name) {
+                val indent = rawLine.indexOf(host)
+                out += IniOffsetTarget(psiFile, lineStart + indent, "Inventory: $inventoryName")
+            }
+        }
     }
 
     // ---- misc ---------------------------------------------------------------

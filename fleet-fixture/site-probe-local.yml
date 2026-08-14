@@ -1,0 +1,7 @@
+---
+# NAV: F12 — `localhost` is not in any of these inventories (Ansible supplies
+# it implicitly). Same rule as the glob above: not understood means not
+# narrowed.
+- hosts: localhost
+  roles:
+    - pattern_probe_agent

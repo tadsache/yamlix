@@ -1,0 +1,11 @@
+---
+# NAV: F13 — one role, two plays, disjoint host patterns. The role's defaults
+# are in scope for the union of both plays' hosts; scoping from whichever play
+# happens to come first would hide them from the other play's hosts entirely.
+- hosts: containers
+  roles:
+    - pattern_probe_agent
+
+- hosts: web_app
+  roles:
+    - pattern_probe_agent

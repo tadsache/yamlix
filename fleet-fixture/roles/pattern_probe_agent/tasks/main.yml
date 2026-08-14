@@ -1,0 +1,4 @@
+---
+- name: use the probe setting
+  ansible.builtin.debug:
+    msg: "{{ probe_setting }} / {{ probe_adjacent }}"
