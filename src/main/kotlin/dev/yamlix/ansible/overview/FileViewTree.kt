@@ -24,6 +24,14 @@ object FileViewTree {
             // so anything rendered now would read as fact and be wrong.
             ViewState.Indexing ->
                 return listOf(OverviewTreeNode(HintNode("Indexing — variables cannot be resolved yet")))
+            ViewState.IndexUnavailable ->
+                return listOf(
+                    OverviewTreeNode(HintNode("The variable index looks empty")),
+                    OverviewTreeNode(
+                        HintNode("This project defines variables, but the index knows none of " +
+                            "them. File | Invalidate Caches… and restart rebuilds it.")
+                    ),
+                )
             ViewState.OutsideContentRoots ->
                 return listOf(
                     OverviewTreeNode(HintNode("This file is outside the project's content roots")),
@@ -198,6 +206,14 @@ data class VariableRowNode(val row: VariableRow) : OverviewNode {
             RowStatus.VARIES -> AllIcons.Nodes.Variable
             RowStatus.AMBIGUOUS -> AllIcons.General.Warning
             RowStatus.PROVIDED_BY_ANSIBLE -> AllIcons.Nodes.Static
+            RowStatus.RUNTIME -> AllIcons.Nodes.Plugin
+            // A loop is an iteration, not a defect: the same neutral icon as
+            // any other value the project supplies rather than a warning.
+            RowStatus.LOOP_ITEM -> AllIcons.Nodes.Variable
+            // Not an error and not a warning: the variable was found, only the
+            // key after the dot was not, and an optional key that the use
+            // already defaults is idiomatic rather than suspect.
+            RowStatus.PARTIAL -> AllIcons.Nodes.Variable
             RowStatus.UNRESOLVED -> AllIcons.General.Error
             RowStatus.NEVER_WINS -> AllIcons.General.Warning
         }

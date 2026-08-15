@@ -69,10 +69,19 @@ class InventoryGraphService(private val project: Project) {
 
     private fun parse(root: VirtualFile): InventoryGraph {
         val builder = InventoryGraphBuilder(root.name)
-        val manager = PsiManager.getInstance(project)
 
-        for (child in root.children.sortedBy { it.name }) {
-            if (child.isDirectory) continue
+        // An inventory is a directory of files, or one file. `inventory = hosts`
+        // in ansible.cfg is the commonest form there is; read as a directory it
+        // has no children, and produced an inventory containing no hosts, which
+        // in turn made every host-scoped variable in the project unresolvable.
+        val files = if (root.isDirectory) {
+            root.children.orEmpty().filterNot { it.isDirectory }.sortedBy { it.name }
+        } else {
+            listOf(root)
+        }
+
+        val manager = PsiManager.getInstance(project)
+        for (child in files) {
             val psi = manager.findFile(child)
             if (psi is YAMLFile) {
                 psi.documents.mapNotNull { it.topLevelValue as? YAMLMapping }

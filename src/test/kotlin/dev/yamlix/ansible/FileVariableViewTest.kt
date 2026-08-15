@@ -91,7 +91,7 @@ class FileVariableViewTest : FleetFixtureTestCase() {
      * is not, and says less than the number does.
      */
     fun testManyLongValuesCollapseToACount() {
-        val row = view(taskFile).uses.single { it.name == "artifact_repo" }
+        val row = view(taskFile).uses.single { it.name == "artifact_repo.url" }
         assertEquals(RowStatus.VARIES, row.status)
         assertEquals("3 different values", row.summary)
         assertEquals("differs by host", row.note)
@@ -153,10 +153,11 @@ class FileVariableViewTest : FleetFixtureTestCase() {
         for (name in listOf("agent_image", "artifact_repo", "retention_days")) {
             val at = text.indexOf(name, text.indexOf("msg:"))
             assertTrue("$name is on the msg line", at > 0)
-            assertEquals(
-                "the caret inside $name must select it",
-                name,
-                view.rowAt(at + 1)?.name,
+            // By prefix: a use written `artifact_repo.url` is one row named for
+            // the whole path, and the caret in its root still belongs to it.
+            assertTrue(
+                "the caret inside $name must select it, got ${view.rowAt(at + 1)?.name}",
+                view.rowAt(at + 1)?.name.orEmpty().substringBefore('.') == name,
             )
         }
     }
@@ -362,7 +363,7 @@ class FileVariableViewTest : FleetFixtureTestCase() {
     fun testSitesShowTheirOwnValueWhenTheyDiffer() {
         val row = FileViewTree.build(ViewState.Ready(view(taskFile)))
             .single { (it.node as? SectionNode)?.text == "Uses" }
-            .children.single { it.node.text == "artifact_repo" }
+            .children.single { it.node.text == "artifact_repo.url" }
 
         assertEquals(3, row.children.size)
         // Highest precedence first, so the list reads as the ladder it is.
@@ -380,7 +381,7 @@ class FileVariableViewTest : FleetFixtureTestCase() {
     fun testLongSiteValuesDoNotPushOutTheRestOfTheRow() {
         val row = FileViewTree.build(ViewState.Ready(view(taskFile)))
             .single { (it.node as? SectionNode)?.text == "Uses" }
-            .children.single { it.node.text == "artifact_repo" }
+            .children.single { it.node.text == "artifact_repo.url" }
 
         for (child in row.children) {
             val detail = child.node.detail!!

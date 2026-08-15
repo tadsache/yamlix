@@ -86,7 +86,18 @@ class InventoryViewTest : FleetFixtureTestCase() {
      */
     fun testHostsAllIsTreatedAsTargetingEveryGroup() {
         val group = view("inventories/env-a/hosts").groups.single { it.name == "containers" }
-        assertEquals(3, group.targetedBy.size)
+        // By name, not by count: the point is that the `hosts: all` playbook is
+        // in the list at all, and a bare number turns every fixture addition
+        // into a failure that says nothing about this rule.
+        assertTrue(
+            "the `hosts: all` play targets it too: ${group.targetedBy.map { it.playbook.name }}",
+            group.targetedBy.any { it.playbook.name == "site-probe-multiplay.yml" },
+        )
+        assertTrue(
+            "as do the plays naming it outright",
+            group.targetedBy.map { it.playbook.name }
+                .containsAll(listOf("site-container-mon.yml", "site-fleet-extra.yml")),
+        )
     }
 
     /** The caret standing on a group header selects that group. */

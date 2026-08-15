@@ -90,7 +90,8 @@ data class VarResolution(
  */
 data class ResolutionContext(
     val host: String,
-    val inventoryRoot: VirtualFile,
+    /** Null for a project with no inventory at all. */
+    val inventoryRoot: VirtualFile?,
     val playbook: VirtualFile? = null,
     val position: PsiElement? = null,
     val knownFacts: Map<String, String> = emptyMap(),
@@ -105,6 +106,14 @@ class VariableResolutionService(private val project: Project) {
 
     companion object {
         fun getInstance(project: Project): VariableResolutionService = project.service()
+        /**
+         * The host used when there is no inventory to name one.
+         *
+         * Never matches a `host_vars` file or a group, which is exactly right:
+         * those cannot apply when nothing says which host this is.
+         */
+        const val NO_HOST = ""
+
         private const val MAX_NESTED_RESOLVE = 4
 
         private val FLOW_CACHE_KEY =
@@ -123,6 +132,11 @@ class VariableResolutionService(private val project: Project) {
         private val HOST_VARS_OWNER_CACHE_KEY =
             Key.create<CachedValue<ConcurrentHashMap<String, Set<String>>>>(
                 "yamlix.ansible.hostVarsOwners",
+            )
+
+        private val UNINDEXED_VARS_CACHE_KEY =
+            Key.create<CachedValue<ConcurrentHashMap<String, Map<String, VarDefinitionData>>>>(
+                "yamlix.ansible.unindexedVarsFiles",
             )
 
         private val LEAD_PLAY_CACHE_KEY =
@@ -185,6 +199,166 @@ class VariableResolutionService(private val project: Project) {
         return out
     }
 
+    /**
+     * What a variable resolves to in a project that has no inventory.
+     *
+     * Most public Ansible projects are like this — a role repository, a
+     * collection, anything run with `-i` given on the command line. Resolution
+     * used to be organised strictly per inventory, so those projects got no
+     * answers at all: measured over eight public repositories, five reported
+     * every variable in every file as undefined.
+     *
+     * Plenty is knowable without a host. A role's `defaults/main.yml` says what
+     * it says regardless of where the role runs; so do `vars/main.yml`, a play's
+     * `vars:`, and anything `set_fact` puts in scope. What is *not* knowable is
+     * skipped rather than guessed: `group_vars` and `host_vars` need an
+     * inventory to place them, and with none they simply do not apply.
+     */
+    fun resolveHostless(
+        name: String,
+        playbook: VirtualFile? = null,
+        position: PsiElement? = null,
+        knownFacts: Map<String, String> = emptyMap(),
+    ): VarResolution =
+        Sweep(name, null, playbook, position, knownFacts)
+            .resolve(NO_HOST, MAX_NESTED_RESOLVE)
+
+    /**
+     * Tasks that produce [name] at run time, near [from].
+     *
+     * A variable a task `register:`s is not undefined — it simply does not
+     * exist yet. Resolution proper admits one only when the play flow proves it
+     * has already run, which is right for deciding a *value*; but when that
+     * cannot be proved the answer is "produced by that task, at run time", not
+     * "not defined in this project". On debops, which registers in one task
+     * file and reads in another, that wrong answer accounted for most of what
+     * the plugin could not explain.
+     *
+     * Restricted to the role in hand, so an unrelated role's `register:` of the
+     * same name never claims authorship.
+     */
+    fun runtimeOrigins(name: String, from: VirtualFile?): List<VirtualFile> {
+        if (from == null) return emptyList()
+        val roleDir = PlayStructure.enclosingRoleDir(from)
+        return definitionsFor(name)
+            .filter { it.definition.scope == VarScope.REGISTERED ||
+                it.definition.scope == VarScope.SET_FACT }
+            .map { it.file }
+            .filter { file ->
+                file == from ||
+                    (roleDir != null && VfsUtilCore.isAncestor(roleDir, file, false))
+            }
+            .distinct()
+    }
+
+    /**
+     * Tasks elsewhere that bind [name] as a loop variable over the role [from]
+     * belongs to.
+     *
+     * The counterpart to [LoopVariables.localBinding], for the case it cannot
+     * see: the binding lives in the *caller*, often in a different repository
+     * area entirely, and the role being read has no record of it. Matching is
+     * by role directory name, which is what `include_role: name:` names.
+     *
+     * Returns nothing for a file outside any role — without a role there is
+     * nothing to match on, and matching every loop in the project by name
+     * alone would attribute one role's `user` to another's.
+     */
+    fun loopBindings(name: String, from: VirtualFile?): List<LoopOrigin> {
+        if (from == null) return emptyList()
+        val roleName = PlayStructure.enclosingRoleDir(from)?.name ?: return emptyList()
+        return rawDefinitionsFor(name)
+            .filter { it.definition.scope == VarScope.LOOP_VAR }
+            .filter { it.definition.qualifier == roleName }
+            .map { LoopOrigin(it.file, it.definition.offset, it.definition.valueText) }
+            .distinctBy { it.file.path to it.offset }
+    }
+
+    /** Where a loop binding was written, and what it loops over. */
+    data class LoopOrigin(val file: VirtualFile, val offset: Int, val collection: String?)
+
+    /**
+     * Definitions read straight out of a `vars_files:` the index cannot see.
+     *
+     * Ansible loads a `vars_files:` entry as YAML whatever it is called, and
+     * projects use that: algo keeps its entire configuration in `config.cfg`,
+     * a YAML mapping with an extension no IDE associates with YAML. The index
+     * never saw the file, so every variable in it was undefined — and worse
+     * than undefined, because the resolver then settled on whatever *did*
+     * mention the name, which for `cloud_providers` was a list in
+     * `tests/fixtures/`. The report went from "not defined" to a confident
+     * walk into the wrong dictionary.
+     *
+     * Read here rather than indexed globally, and that is the whole point.
+     * Which files are vars files is a fact about a *playbook*, not about a
+     * path: indexing every `.cfg` in every project would invent variables out
+     * of the INI files that name is usually attached to. Only a file some play
+     * actually names is read, which is also what makes the ordinary
+     * [VarScope.VARS_FILE] admission below correct for it.
+     */
+    fun unindexedVarsFileSites(name: String, playbook: VirtualFile?):
+        List<Pair<VirtualFile, VarDefinitionData>> =
+        unindexedVarsFileDefinitions(name, playbook).map { it.file to it.definition }
+
+    private fun unindexedVarsFileDefinitions(
+        name: String,
+        playbook: VirtualFile?,
+    ): List<IndexedDefinition> {
+        if (playbook == null) return emptyList()
+        val psi = PsiManager.getInstance(project).findFile(playbook) as? YAMLFile
+            ?: return emptyList()
+        val out = ArrayList<IndexedDefinition>()
+        for (play in PlayStructure.plays(psi)) {
+            for (file in varsFileTargets(play, playbook)) {
+                if (isIndexable(file)) continue
+                topLevelKeysOf(file)[name]?.let { out += IndexedDefinition(file, it) }
+            }
+        }
+        return out
+    }
+
+    /**
+     * Whether the variable index would already have seen [file].
+     *
+     * Deliberately mirrors [AnsibleVarIndex.getInputFilter]: reading a file the
+     * index also holds would list every one of its definitions twice, and a
+     * duplicate site is indistinguishable on screen from two real ones.
+     */
+    private fun isIndexable(file: VirtualFile): Boolean =
+        file.fileType == org.jetbrains.yaml.YAMLFileType.YML ||
+            VarFileRole.isIniInventory(file) ||
+            VarFileRole.isExtensionlessVarFile(file)
+
+    /**
+     * Every top-level `name: value` in [file], parsed as YAML regardless of
+     * what the file is called, and cached until something changes.
+     */
+    private fun topLevelKeysOf(file: VirtualFile): Map<String, VarDefinitionData> =
+        genericCache(UNINDEXED_VARS_CACHE_KEY).getOrPut(file.path) {
+            val text = com.intellij.openapi.fileEditor.impl.LoadTextUtil.loadText(file)
+            val yaml = com.intellij.psi.PsiFileFactory.getInstance(project).createFileFromText(
+                file.name, org.jetbrains.yaml.YAMLLanguage.INSTANCE, text,
+            ) as? YAMLFile ?: return@getOrPut emptyMap()
+
+            val out = LinkedHashMap<String, VarDefinitionData>()
+            for (document in yaml.documents) {
+                val mapping = document.topLevelValue as? YAMLMapping ?: continue
+                for (entry in mapping.keyValues) {
+                    val key = entry.keyText.trim()
+                    if (key.isEmpty()) continue
+                    out[key] = VarDefinitionData(
+                        entry.textOffset,
+                        VarScope.VARS_FILE,
+                        qualifier = "",
+                        valueText = (entry.value as? org.jetbrains.yaml.psi.YAMLScalar)
+                            ?.textValue?.trim(),
+                        guard = null,
+                    )
+                }
+            }
+            out
+        }
+
     /** One indexed definition, hydrated with the file it came from. */
     private data class IndexedDefinition(val file: VirtualFile, val definition: VarDefinitionData)
 
@@ -213,15 +387,20 @@ class VariableResolutionService(private val project: Project) {
      */
     private inner class Sweep(
         private val name: String,
-        private val inventoryRoot: VirtualFile,
+        /** Null when the project has no inventory; see [resolveHostless]. */
+        private val inventoryRoot: VirtualFile?,
         private val playbook: VirtualFile?,
         private val position: PsiElement?,
         private val knownFacts: Map<String, String>,
     ) {
-        val graph: InventoryGraph = InventoryGraphService.getInstance(project).graphFor(inventoryRoot)
-        private val definitions: List<IndexedDefinition> = definitionsFor(name)
-        private val plays: List<PlayScope> =
-            playbook?.let { playScopesFor(it, inventoryRoot, graph) } ?: emptyList()
+        val graph: InventoryGraph = inventoryRoot
+            ?.let { InventoryGraphService.getInstance(project).graphFor(it) }
+            ?: InventoryGraph.EMPTY
+        private val definitions: List<IndexedDefinition> =
+            definitionsFor(name) + unindexedVarsFileDefinitions(name, playbook)
+        private val plays: List<PlayScope> = playbook
+            ?.let { book -> inventoryRoot?.let { playScopesFor(book, it, graph) } }
+            ?: emptyList()
 
         private val flow: PlayFlow? = playbook
             ?.let { book -> firstPlay(book, position)?.let { cachedFlow(book, it) } }
@@ -233,7 +412,8 @@ class VariableResolutionService(private val project: Project) {
          * makes a host non-interchangeable, including one only read while
          * deciding a `when:` guard for some other name.
          */
-        private val hostsWithOwnVars: Set<String> = hostVarsOwners(inventoryRoot, playbook)
+        private val hostsWithOwnVars: Set<String> =
+            inventoryRoot?.let { hostVarsOwners(it, playbook) } ?: emptySet()
 
         fun equivalenceKey(host: String): String {
             val own = if (host in hostsWithOwnVars) host else ""
@@ -247,6 +427,11 @@ class VariableResolutionService(private val project: Project) {
 
             val groupOrder = graph.groupsForHost(host)
                 .withIndex().associate { (index, group) -> group.name to index }
+                // With no inventory there are no groups — except `all`, which
+                // every host is in by definition, so `group_vars/all` applies
+                // to whatever ends up running this. Skipping it left projects
+                // that keep their configuration there resolving nothing.
+                .ifEmpty { if (inventoryRoot == null) mapOf(InventoryGraph.ALL to 0) else emptyMap() }
             val context = ResolutionContext(host, inventoryRoot, playbook, position, knownFacts)
 
             val sites = definitions.mapNotNull { (file, definition) ->
@@ -301,7 +486,18 @@ class VariableResolutionService(private val project: Project) {
      * common way to make a sub-playbook's relative role references work) gives
      * the same physical file two logical VFS paths and both get indexed.
      */
+    /**
+     * Definitions that compete for a value.
+     *
+     * [VarScope.LOOP_VAR] is filtered out here rather than at each call site so
+     * that no future caller can accidentally let a loop variable take part in
+     * precedence — it has no value to contribute, and one that "won" would be
+     * a value that never exists. [loopBindings] is the way to ask about them.
+     */
     private fun definitionsFor(name: String): List<IndexedDefinition> =
+        rawDefinitionsFor(name).filter { it.definition.scope != VarScope.LOOP_VAR }
+
+    private fun rawDefinitionsFor(name: String): List<IndexedDefinition> =
         genericCache(DEFINITION_CACHE_KEY).getOrPut(name) {
             val raw = ArrayList<IndexedDefinition>()
             FileBasedIndex.getInstance().processValues(
@@ -458,11 +654,19 @@ class VariableResolutionService(private val project: Project) {
             }
 
             VarScope.VARS_FILE -> {
-                if (context.playbook != null &&
-                    plays.none { file.path in it.varsFiles && it.admits(context.host) }
-                ) {
-                    return null
+                // Which files a play loads is written in the playbook and needs
+                // no inventory to read. Without this fallback the whole scope
+                // was unreachable on any project resolving hostlessly — a play
+                // scope list is only built when there is an inventory, so an
+                // empty one rejected every `vars_files:` definition rather than
+                // admitting it. algo, whose entire configuration arrives that
+                // way through `hosts: localhost`, resolved none of it.
+                val declared = if (plays.isNotEmpty()) {
+                    plays.filter { it.admits(context.host) }.flatMapTo(HashSet()) { it.varsFiles }
+                } else {
+                    playbookVarsFiles(context.playbook)
                 }
+                if (context.playbook != null && file.path !in declared) return null
                 if (!anyPlayTargetsHost()) return null
                 site()
             }
@@ -526,6 +730,12 @@ class VariableResolutionService(private val project: Project) {
             }
 
             VarScope.BLOCK_VARS, VarScope.TASK_VARS -> site()
+
+            // Unreachable — `definitionsFor` filters these out before anything
+            // gets here. Kept explicit rather than folded into an `else` so
+            // that adding a scope later is a compile error, not a silent
+            // admission of something that should never win.
+            VarScope.LOOP_VAR -> null
         }
     }
 
@@ -551,7 +761,9 @@ class VariableResolutionService(private val project: Project) {
      *   order correctly as a precedence tie-break — or null when out of scope.
      */
     private fun varsAdjacency(file: VirtualFile, context: ResolutionContext): Int? {
-        if (VfsUtilCore.isAncestor(context.inventoryRoot, file, false)) {
+        if (context.inventoryRoot != null &&
+            VfsUtilCore.isAncestor(context.inventoryRoot, file, false)
+        ) {
             return ADJACENT_TO_INVENTORY
         }
         var dir = file.parent
@@ -564,7 +776,7 @@ class VariableResolutionService(private val project: Project) {
         val layout = AnsibleLayoutService.getInstance(project)
         val bases = listOfNotNull(
             context.playbook?.parent,
-            layout.cfgFor(context.inventoryRoot)?.baseDir,
+            context.inventoryRoot?.let { layout.cfgFor(it)?.baseDir },
         )
         return if (bases.any { it == holder }) ADJACENT_TO_PLAYBOOK else null
     }
@@ -713,20 +925,36 @@ class VariableResolutionService(private val project: Project) {
         return names
     }
 
-    private fun varsFilePaths(play: YAMLMapping, playbook: VirtualFile): Set<String> {
-        val sequence = play.getKeyValueByKey("vars_files")?.value as? YAMLSequence
+    /**
+     * Every file [playbook]'s plays name in `vars_files:`, read without an
+     * inventory. Consulted when the play-scope list is empty, which is exactly
+     * the case an inventory would otherwise have covered.
+     */
+    private fun playbookVarsFiles(playbook: VirtualFile?): Set<String> {
+        val book = playbook ?: return emptySet()
+        val psi = PsiManager.getInstance(project).findFile(book) as? YAMLFile
             ?: return emptySet()
-        val paths = LinkedHashSet<String>()
+        return PlayStructure.plays(psi).flatMapTo(HashSet()) { varsFilePaths(it, book) }
+    }
+
+    private fun varsFilePaths(play: YAMLMapping, playbook: VirtualFile): Set<String> =
+        varsFileTargets(play, playbook).mapTo(LinkedHashSet()) { it.path }
+
+    /** The files a play's `vars_files:` names, resolved against the playbook. */
+    private fun varsFileTargets(play: YAMLMapping, playbook: VirtualFile): List<VirtualFile> {
+        val sequence = play.getKeyValueByKey("vars_files")?.value as? YAMLSequence
+            ?: return emptyList()
+        val out = ArrayList<VirtualFile>()
         for (item in sequence.items) {
             val scalar = item.value as? org.jetbrains.yaml.psi.YAMLScalar ?: continue
-            dev.yamlix.ansible.refs.AnsibleTargets.resolveFile(
+            out += dev.yamlix.ansible.refs.AnsibleTargets.resolveFile(
                 scalar.textValue,
                 dev.yamlix.ansible.refs.AnsibleTargets.FileKind.PLAY_VARS,
                 playbook,
                 project,
-            ).forEach { paths += it.path }
+            )
         }
-        return paths
+        return out
     }
 
     /**

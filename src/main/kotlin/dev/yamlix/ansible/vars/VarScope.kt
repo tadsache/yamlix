@@ -21,6 +21,17 @@ enum class VarScope(val rank: Int, val display: String) {
     SET_FACT(20, "set_fact"),
     REGISTERED(20, "registered"),
     ROLE_PARAM(21, "role param"),
+
+    /**
+     * A name bound by `loop_control: loop_var:` — not a definition at all.
+     *
+     * It holds a different value on every iteration and none between them, so
+     * it is deliberately kept out of [VariableResolutionService]'s precedence
+     * sweep: letting it compete would have it "win" with a value that does not
+     * exist. It is looked up on its own, only to answer why a name that nothing
+     * defines is nonetheless perfectly valid where it is written.
+     */
+    LOOP_VAR(22, "loop variable"),
     ;
 
     /** True for scopes whose visibility depends on where in the play you are. */

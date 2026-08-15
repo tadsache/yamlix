@@ -211,3 +211,148 @@ Flow-sensitive scopes (`include_vars`, `set_fact`, `register`) are exempt and
 stay in the list when out of scope, because there the reason is *position* —
 "it is set in this very play, just after where you are" — which is frequently
 the answer to why a value is not what was expected.
+
+## F19 — a variable a task registers is not an undefined variable
+
+`roles/register_probe_agent` registers `probe_status` in `tasks/collect.yml`
+and reads it in `tasks/main.yml`. No file in the repository holds its value,
+because it has none until Ansible runs the command.
+
+Reporting it as "not defined in this project" is false — the variable exists,
+it just does not exist *yet* — and it was the single commonest thing the
+plugin could not explain on debops, which registers in one task file and reads
+in another throughout. The report must name the task that produces it and show
+no value, since inventing one is exactly what this plugin does not do.
+
+
+## F20 — a name bound by a loop is not an undefined variable
+
+`roles/loop_probe_agent` reads `probe_target`, which nothing in the role
+defines and nothing ever will: it is bound by the `loop_control:` of the task
+in `site-probe-loop.yml` that includes the role. The binding is written in one
+file and read in another, with no link between them.
+
+Reported as "not defined in this project", that is an accusation against a
+role which is correct. The answer a reader wants is which task supplies it and
+from which collection — and the collection (`{{ probe_targets }}`) is itself in
+the repository, so it stays on the row rather than being thrown away.
+
+`probe_port`, in the same file, is bound by a loop on its own task. That one is
+answered from the PSI instead of the index, because the PSI can also say where
+the binding *stops* applying, which an index record cannot.
+
+A loop binding is deliberately kept out of precedence. It is indexed, so it
+could be mistaken for a definition, but it has no value between iterations;
+letting it compete would have it win with a value that exists on no iteration
+at all.
+
+## F21 — a role parameter written inline is still a definition
+
+`roles/container_monitoring_agent/meta/main.yml` passes `probe_label` to
+`inline_param_agent` directly on the `- role:` entry rather than under a
+`vars:` block. Both forms are ordinary Ansible; only the nested one was read.
+
+A role whose whole interface is passed inline therefore had no definition
+anywhere, and every use of it reported as undefined. kubespray's `adduser` is
+written exactly this way — `- role: adduser` / `user: "{{ addusers.etcd }}"` —
+so all fourteen uses of `user` in that role read as broken.
+
+Directives are told apart from parameters by name, and `when: true` sits beside
+the parameter here to hold that line: an allowlist of parameter names is
+impossible (the role author chooses them), so the denylist of Ansible's own
+role-entry keywords is what keeps `when` from being indexed as a variable.
+
+## F22 — `user.name` is a question with its own answer
+
+`roles/inline_param_agent` reads `probe_repo.url`, where `probe_repo` is handed
+to it as `{{ artifact_repo }}` by the caller's meta dependency. Following that
+means one hop through the template and then a key inside whichever definition
+of `artifact_repo` wins — the shape kubespray's `adduser` has throughout
+(`user: "{{ addusers.etcd }}"`, then `user.name`, `user.shell`, `user.system`).
+
+Recording only the root collapsed all of that into one row saying nothing about
+any of it. The fixture's `container_monitoring_agent` shows why the ladder has
+to survive the walk: `artifact_repo` is defined three times at three
+precedences, so `artifact_repo.url` keeps all three rungs, each pointing at the
+`url:` line inside its own file rather than at the dictionary above it.
+
+The walk starts at the *winning* definition and nowhere else. Ansible replaces
+dictionaries rather than merging them, so a `host_vars` file that redefines
+`artifact_repo` without a `url:` makes `artifact_repo.url` undefined on that
+host no matter how many other files spell `url:` out. Indexing flat `a.b` keys
+would produce exactly that wrong answer with full confidence; walking one
+definition cannot.
+
+A key that is not there is reported as such and never as an undefined variable
+— the root was found, and only the key was not. The note names both the segment
+that actually failed and the file consulted, which is what makes it checkable:
+on algo it reads `no `azure` in test-aws-credentials.yml`, and the file name is
+the tell that the resolver picked a test fixture because the real definition
+lives in an unindexed `config.cfg`. An absence the use already guards with
+`| default(...)` says so in the note instead, since that is idiomatic Ansible
+rather than a defect.
+
+## F23 — a manifest's keys are its schema, not variables
+
+Every plain-mapping YAML was indexed key by key, on the assumption that it is a
+file some `vars_files:` might name. Ansible repositories are full of files
+where that is false, and kubespray's `galaxy.yml` is the clearest: it was
+indexed as thirteen variables called `namespace`, `name`, `version`,
+`readme`, `description`, `dependencies` and so on — names common enough to then
+be offered in completion and to collide with real variables elsewhere.
+
+Opening the file made it plainer still. Thirteen rows under "Defines", each
+reading "unresolved — not defined in this project", about a file that defines
+all thirteen on screen. Two separate faults met there, and both are fixed:
+
+- Manifests are recognised by name and indexed as nothing. A name list rather
+  than a shape test, because these files *are* plain mappings and look exactly
+  like vars files; only what they are called tells them apart. The list stays
+  short on purpose — a manifest wrongly indexed invents variables, while a vars
+  file wrongly skipped is only reachable through `vars_files:`, and none of
+  these names is one a `vars_files:` would ever point at.
+- A definition no play reaches now says "defined here, but no play brings this
+  file into scope", and shows the value the file actually gives it. Printing
+  "not defined in this project" next to the line defining it is a contradiction
+  the reader has to stop and argue with, and it describes the resolver's reach
+  rather than the file.
+
+## F24 — `defaults/main/` is a directory Ansible loads whole
+
+`roles/inline_param_agent/defaults/main/probe.yml` defines `probe_prefix`.
+Ansible accepts `defaults/main.yml`, `defaults/main.yaml` and `defaults/main/`
+as a directory, and roles with a large surface routinely split their defaults
+the third way.
+
+The path checks looked exactly one level up for the role, so the directory form
+fell past them into a `vars_files` candidate: indexed with no role to qualify
+it, which no host ever admits. The variables were in the index and resolved to
+nothing regardless — silent, and impossible to tell from a genuine absence.
+
+The rank matters as much as the resolution. Landing at `vars_files` precedence
+would let a role default beat `group_vars`, which is backwards; defaults must
+lose to everything, so the test asserts the scope and not merely the value.
+
+Found on kubespray, where this is the whole of the central `kubespray_defaults`
+role: `bin_dir`, `kube_config_dir` and `kubectl`, the names read most often
+in the project, every one of them reported undefined at every use.
+
+## F25 — a `vars_files:` entry is YAML whatever it is called
+
+`site-probe-cfg.yml` names `probe-settings.cfg`, and that naming is the only
+thing that makes the file a vars file. Ansible loads what a play tells it to
+and does not care about the extension.
+
+Read at resolution time rather than indexed, and the distinction is the whole
+design. Which files are vars files is a fact about a *playbook*, not about a
+path: indexing every `.cfg` in a project would invent variables out of the INI
+files that extension usually belongs to. So only a file some play actually
+names is read — which is also what makes the ordinary `vars_files` admission
+correct for it, and what the "unreferenced file" test pins down.
+
+Two faults kept algo's entire configuration unresolved. Its `config.cfg` was
+invisible to the index, and its plays are `hosts: localhost`, so resolution
+took the hostless path — where the play-scope list is empty, and an empty list
+rejected every `vars_files` definition instead of admitting it. Both are fixed;
+the second was making the whole scope unreachable for any project without an
+inventory, not just this one.

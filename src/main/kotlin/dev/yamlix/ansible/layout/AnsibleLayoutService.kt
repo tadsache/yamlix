@@ -12,6 +12,7 @@ import com.intellij.psi.util.CachedValueProvider
 import com.intellij.psi.util.CachedValuesManager
 import com.intellij.psi.util.PsiModificationTracker
 import dev.yamlix.ansible.psi.PlayStructure
+import dev.yamlix.ansible.vars.VarFileRole
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -70,6 +71,28 @@ class AnsibleLayoutService(private val project: Project) {
             // build and tooling output
             "build", "target", "node_modules", "venv", "molecule",
         )
+
+        /**
+         * Directories that, in combination, mark an Ansible project root.
+         *
+         * Two are required: `roles/` alone appears inside collections and test
+         * trees, and `group_vars/` alone sits beside an inventory.
+         */
+        private val PROJECT_ROOT_MARKERS = listOf(
+            "roles", "playbooks", "inventories", "inventory", "group_vars", "host_vars",
+        )
+
+        /** How far above a file to look for a project root. */
+        private const val MAX_BASE_SEARCH_DEPTH = 8
+
+        /** Directory names that hold inventories, by convention. */
+        private val INVENTORY_DIR_NAMES = listOf("inventories", "inventory")
+
+        /** What an inventory file is called, with or without an extension. */
+        private val INVENTORY_FILE_NAMES = setOf("hosts", "inventory")
+
+        /** Directories that hold variables *for* an inventory, not an inventory. */
+        private val VARS_DIR_NAMES = setOf("group_vars", "host_vars")
     }
 
     // ---- ansible.cfg -------------------------------------------------------
@@ -118,6 +141,60 @@ class AnsibleLayoutService(private val project: Project) {
             },
             false,
         )
+
+    /**
+     * The project root [file] belongs to, with or without an `ansible.cfg`.
+     *
+     * Ansible does not require an `ansible.cfg`, and most real projects do not
+     * have one where this code was looking. Measured against eight public
+     * repositories, five had no reachable config: debops keeps its roles under
+     * `ansible/roles`, openstack-ansible ships none at all, and ansible-examples
+     * and ansible-for-devops keep one per sub-project rather than at the top.
+     * Every one of them resolved nothing, because with no base directory there
+     * were no playbooks and no inventories to resolve against.
+     *
+     * The config still wins where there is one — it is what Ansible itself
+     * uses. Failing that, the root is inferred from the layout: the nearest
+     * ancestor that holds the things only an Ansible project root holds.
+     *
+     * This deliberately does not widen [isAnsibleContext]. A file is still only
+     * Ansible's because a config is above it or it sits inside a role; this
+     * only decides *where the project starts* once that is settled.
+     */
+    fun baseDirFor(file: VirtualFile): VirtualFile? =
+        cfgFor(file)?.baseDir ?: inferredBase(file)
+
+    /**
+     * The nearest ancestor that looks like a project root.
+     *
+     * A role's own directory is skipped: `roles/nginx` contains `vars` and
+     * `defaults`, which would otherwise make every role look like a project of
+     * its own and cut it off from the playbooks that use it.
+     */
+    private fun inferredBase(file: VirtualFile): VirtualFile? {
+        val roleDir = PlayStructure.enclosingRoleDir(file)
+        var dir: VirtualFile? = when {
+            // Start above `roles/`, so `roles/nginx/tasks/main.yml` considers
+            // the directory that owns the whole role tree.
+            roleDir != null -> roleDir.parent?.parent
+            file.isDirectory -> file
+            else -> file.parent
+        }
+        var fallback: VirtualFile? = null
+        var depth = 0
+        while (dir != null && depth++ < MAX_BASE_SEARCH_DEPTH) {
+            if (looksLikeProjectRoot(dir)) return dir
+            if (fallback == null && dir.findChild("roles")?.isDirectory == true) fallback = dir
+            dir = dir.parent
+        }
+        return fallback
+    }
+
+    /** Holds at least two of the things that together only a project root has. */
+    private fun looksLikeProjectRoot(dir: VirtualFile): Boolean {
+        val markers = PROJECT_ROOT_MARKERS.count { dir.findChild(it)?.isDirectory == true }
+        return markers >= 2
+    }
 
     /** True when [file] sits anywhere inside a directory tree carrying an `ansible.cfg`. */
     fun isAnsibleContext(file: VirtualFile): Boolean =
@@ -207,7 +284,7 @@ class AnsibleLayoutService(private val project: Project) {
      * treated those playbooks as though they did not exist.
      */
     fun playbooks(from: VirtualFile): List<VirtualFile> {
-        val base = cfgFor(from)?.baseDir ?: return emptyList()
+        val base = baseDirFor(from) ?: return emptyList()
         return playbookCache().getOrPut(base.path) { scanPlaybooks(base) }
     }
 
@@ -261,14 +338,56 @@ class AnsibleLayoutService(private val project: Project) {
      * subdirectory of a top-level `inventories` directory.
      */
     fun inventoryRoots(from: VirtualFile): List<VirtualFile> {
-        val cfg = cfgFor(from)
-        val base = cfg?.baseDir ?: return emptyList()
+        val base = baseDirFor(from) ?: return emptyList()
         val roots = LinkedHashSet<VirtualFile>()
-        cfg.inventory.forEach { entry -> resolvePath(entry, base)?.let(roots::add) }
-        base.findChild("inventories")?.children
-            ?.filter { it.isDirectory }
-            ?.forEach(roots::add)
-        base.findChild("inventory")?.takeIf { it.isDirectory }?.let(roots::add)
+
+        // What the config points at, whatever shape it is. `inventory = ./hosts`
+        // naming a single file is the commonest form of all — algo uses it —
+        // and it used to be added as if it were a directory, whose (absent)
+        // children then produced an inventory with no hosts in it.
+        cfgFor(from)?.inventory?.forEach { entry -> resolvePath(entry, base)?.let(roots::add) }
+
+        // The classic layout: a `hosts` file beside site.yml, no directory and
+        // no config entry. ansible-examples is written this way throughout.
+        for (name in INVENTORY_FILE_NAMES) {
+            base.findChild(name)
+                ?.takeIf { !it.isDirectory && VarFileRole.isIniInventory(it) }
+                ?.let(roots::add)
+        }
+
+        for (name in INVENTORY_DIR_NAMES) {
+            val dir = base.findChild(name)?.takeIf { it.isDirectory } ?: continue
+            // The directory itself, when it holds the inventory directly.
+            if (holdsInventoryFiles(dir)) roots += dir
+            // And one level down: `inventory/sample`, `inventory/production`.
+            // kubespray keeps every inventory there, and taking only
+            // `inventory/` found an empty one.
+            dir.children.orEmpty()
+                .filter { it.isDirectory && holdsInventoryFiles(it) }
+                .forEach(roots::add)
+        }
         return roots.toList()
+    }
+
+    /**
+     * Whether [dir] directly contains something an inventory is made of.
+     *
+     * Deliberately narrow. "Any directory holding YAML" swept up
+     * `inventory/group_vars` and openstack-ansible's `inventory/env.d`, whose
+     * mappings then parsed as though they were host groups — phantom groups
+     * invented out of unrelated configuration.
+     */
+    private fun holdsInventoryFiles(dir: VirtualFile): Boolean {
+        if (dir.name in VARS_DIR_NAMES) return false
+        return dir.children.orEmpty().any { child ->
+            when {
+                // An inventory keeps its variables beside it.
+                child.isDirectory -> child.name in VARS_DIR_NAMES
+                // Named like an inventory, or unmistakably one by content.
+                else -> child.nameWithoutExtension in INVENTORY_FILE_NAMES ||
+                    child.extension == "ini" ||
+                    VarFileRole.isIniInventory(child)
+            }
+        }
     }
 }

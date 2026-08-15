@@ -168,8 +168,20 @@ class OverviewTest : FleetFixtureTestCase() {
         assertEquals("every group_vars/host_vars file names something real: $orphans", 0, orphans.size)
     }
 
-    fun testEveryRoleIsReachable() {
+    /**
+     * Exactly one role is unreachable, and it is the one meant to be.
+     *
+     * F19's `register_probe_agent` is deliberately run by no playbook — that is
+     * the shape it exists to reproduce. Asserting the name rather than a count
+     * of zero keeps the guard against a role becoming unreachable by accident,
+     * and gives the unused-role finding its only positive case in the fixture.
+     */
+    fun testTheOnlyUnreachableRoleIsTheOneMeantToBe() {
         val unused = overview().findings.filter { it.kind == FindingKind.UNUSED_ROLE }
-        assertEquals("all three roles are used by some playbook: $unused", 0, unused.size)
+        assertEquals("exactly one: $unused", 1, unused.size)
+        assertTrue(
+            "and it is F19's: ${unused.single().message}",
+            unused.single().message.contains("register_probe_agent"),
+        )
     }
 }

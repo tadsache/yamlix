@@ -1,0 +1,13 @@
+---
+# NAV: F21 — `probe_label` is passed by the caller as an inline role parameter,
+# written directly on the `- role:` entry rather than under a `vars:` block.
+# Nothing in this role defines it and nothing needs to.
+- name: Announce which fleet this is
+  ansible.builtin.debug:
+    msg: "{{ probe_prefix }} monitoring {{ probe_label }}"
+
+# NAV: F22 — one hop and then a key: `probe_repo` is `{{ artifact_repo }}`, and
+# `url` is a key inside whichever definition of *that* wins.
+- name: Announce where artefacts come from
+  ansible.builtin.debug:
+    msg: "from {{ probe_repo.url }}"

@@ -11,7 +11,9 @@ import com.intellij.util.io.DataExternalizer
 import com.intellij.util.io.EnumeratorStringDescriptor
 import com.intellij.util.io.KeyDescriptor
 import dev.yamlix.ansible.psi.PlayStructure
+import com.intellij.psi.PsiFileFactory
 import org.jetbrains.yaml.YAMLFileType
+import org.jetbrains.yaml.YAMLLanguage
 import org.jetbrains.yaml.psi.YAMLFile
 import org.jetbrains.yaml.psi.YAMLKeyValue
 import org.jetbrains.yaml.psi.YAMLMapping
@@ -34,7 +36,32 @@ class AnsibleVarIndex : FileBasedIndexExtension<String, List<VarDefinitionData>>
          * Bump on ANY change to what is indexed or to the record format.
          * Forgetting is the classic way to ship a corrupt index.
          */
-        const val VERSION = 5
+        /**
+         * Bumped whenever what gets indexed changes, so an existing index is
+         * rebuilt rather than trusted. Version 6 widened the filter to
+         * extensionless `group_vars/all` files, which an older index never saw
+         * and would otherwise keep reporting as non-existent; version 7 added
+         * [VarScope.LOOP_VAR] records; version 8 stopped indexing manifests
+         * such as `galaxy.yml`, whose keys an older index still holds as
+         * variables.
+         */
+        const val VERSION = 8
+
+        /**
+         * Keys on a `roles:` entry that Ansible reads itself. Everything else
+         * on the entry is a parameter handed to the role.
+         *
+         * A denylist rather than an allowlist because parameter names are the
+         * role author's to choose; getting this list wrong invents a variable
+         * at worst, where an allowlist would lose every real one.
+         */
+        private val ROLE_ENTRY_DIRECTIVES = setOf(
+            "role", "name", "vars", "when", "tags", "apply", "delegate_to",
+            "delegate_facts", "become", "become_user", "become_method", "become_flags",
+            "remote_user", "connection", "port", "environment", "no_log",
+            "ignore_errors", "any_errors_fatal", "run_once", "check_mode", "diff",
+            "throttle", "timeout", "collections", "module_defaults",
+        )
 
         private val SET_FACT = setOf("set_fact", "ansible.builtin.set_fact")
         private val TASK_CONTAINERS = listOf("block", "rescue", "always")
@@ -50,7 +77,13 @@ class AnsibleVarIndex : FileBasedIndexExtension<String, List<VarDefinitionData>>
 
     override fun getInputFilter(): FileBasedIndex.InputFilter =
         FileBasedIndex.InputFilter { file ->
-            file.fileType == YAMLFileType.YML || VarFileRole.isIniInventory(file)
+            file.fileType == YAMLFileType.YML ||
+                VarFileRole.isIniInventory(file) ||
+                // Ansible loads `group_vars/all` with no extension at all, and
+                // the official ansible-examples repository is written that way.
+                // Such a file is plain text to the IDE, so without this it was
+                // never indexed and its variables did not exist.
+                VarFileRole.isExtensionlessVarFile(file)
         }
 
     override fun getIndexer(): DataIndexer<String, List<VarDefinitionData>, FileContent> =
@@ -80,12 +113,27 @@ class AnsibleVarIndex : FileBasedIndexExtension<String, List<VarDefinitionData>>
         }
     }
 
+    /**
+     * The file as YAML, parsing plain text as YAML when that is what it is.
+     *
+     * An extensionless `group_vars/all` has no YAML PSI of its own — the IDE
+     * sees plain text — so one is built from the content here. Ansible reads
+     * the file as YAML regardless of what it is called, and so must this.
+     */
+    private fun yamlOf(content: FileContent): YAMLFile? {
+        (content.psiFile as? YAMLFile)?.let { return it }
+        if (!VarFileRole.isExtensionlessVarFile(content.file)) return null
+        return PsiFileFactory.getInstance(content.project).createFileFromText(
+            content.fileName, YAMLLanguage.INSTANCE, content.contentAsText,
+        ) as? YAMLFile
+    }
+
     private fun index(content: FileContent, out: Collector) {
         val file: VirtualFile = content.file
         when (val role = VarFileRole.fromPath(file)) {
             is VarFileRole.IniInventory -> indexIni(content.contentAsText.toString(), out)
             is VarFileRole.FlatVars -> {
-                val psi = content.psiFile as? YAMLFile ?: return
+                val psi = yamlOf(content) ?: return
                 indexFlatMapping(psi, role.scope, role.qualifier, out)
             }
             is VarFileRole.Tasks -> {
@@ -152,15 +200,40 @@ class AnsibleVarIndex : FileBasedIndexExtension<String, List<VarDefinitionData>>
         }
     }
 
-    /** `- role: common` / `vars: {...}` contributes role params at rank 21. */
+    /**
+     * `- role: common` contributes role params at rank 21 — from its `vars:`
+     * block *and* from keys written directly on the entry.
+     *
+     * Both forms are ordinary Ansible and the inline one is the older and
+     * commoner of the two:
+     *
+     * ```yaml
+     * dependencies:
+     *   - role: adduser
+     *     user: "{{ addusers.etcd }}"      # inline
+     *   - role: adduser
+     *     vars:
+     *       user: "{{ addusers.kube }}"    # nested
+     * ```
+     *
+     * Reading only the nested form left roles whose entire interface is passed
+     * inline with no definition anywhere: kubespray's `adduser` reads `user` in
+     * every task of the role and nothing in the repository appeared to define
+     * it, so all of it reported as "not defined in this project". Anything that
+     * is a directive rather than a parameter is excluded by name — that list is
+     * finite and documented, while parameter names are arbitrary.
+     */
     private fun indexRoleParamSequence(sequence: YAMLSequence, out: Collector) {
         for (item in sequence.items) {
             val mapping = item.value as? YAMLMapping ?: continue
             val roleName = mapping.getKeyValueByKey("role")?.valueText?.trim()
                 ?: mapping.getKeyValueByKey("name")?.valueText?.trim()
                 ?: ""
-            val vars = mapping.getKeyValueByKey("vars")?.value as? YAMLMapping ?: continue
-            for (entry in vars.keyValues) {
+
+            val inline = mapping.keyValues.filter { it.keyText.trim() !in ROLE_ENTRY_DIRECTIVES }
+            val nested = (mapping.getKeyValueByKey("vars")?.value as? YAMLMapping)?.keyValues
+                .orEmpty()
+            for (entry in inline + nested) {
                 out.add(
                     entry.keyText.trim(), entry.textOffset,
                     VarScope.ROLE_PARAM, roleName, scalarText(entry),
@@ -193,6 +266,21 @@ class AnsibleVarIndex : FileBasedIndexExtension<String, List<VarDefinitionData>>
 
     private fun indexTask(task: YAMLMapping, roleName: String, out: Collector) {
         val guard = task.getKeyValueByKey("when")?.valueText?.trim()?.ifBlank { null }
+
+        // A loop that hands its variable to an included role is the only way a
+        // role's own files can be searched for the binding: it is written in
+        // the caller and read in the callee, with nothing in between. Bindings
+        // that stay inside one file are left out on purpose — the PSI answers
+        // those exactly, including where they stop applying, which an index
+        // record cannot.
+        LoopVariables.bindingOf(task)?.let { binding ->
+            binding.targetRole?.let { target ->
+                out.add(
+                    binding.varName, task.textOffset, VarScope.LOOP_VAR,
+                    target, binding.collection, guard,
+                )
+            }
+        }
 
         for (kv in task.keyValues) {
             val key = kv.keyText.trim()

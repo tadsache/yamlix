@@ -111,7 +111,9 @@ object AnsibleVarDocumentation {
 
         for (row in report.rows) {
             html.append(DocumentationMarkup.SECTION_HEADER_START)
-            html.append(escape(row.inventory))
+            // A project with no inventory still has a row; it just cannot be
+            // attributed to one.
+            html.append(escape(row.inventory ?: "no inventory"))
             html.append(DocumentationMarkup.SECTION_SEPARATOR)
 
             if (!row.coversWholeInventory) {
@@ -161,6 +163,11 @@ object AnsibleVarDocumentation {
         // No single value is shown: the candidates are listed underneath.
         ValueKind.AMBIGUOUS -> grey("unresolved &mdash; one of the candidates below")
         ValueKind.RUNTIME -> grey("unresolved &mdash; run-time value")
+        // The collection is worth showing even though the entry is not: it is
+        // written in the repo, and it is what the reader goes to look at next.
+        ValueKind.LOOP_ITEM -> row.value
+            ?.let { grey("one entry of ") + "<tt>${escape(it)}</tt>" }
+            ?: grey("unresolved &mdash; one entry per loop iteration")
         ValueKind.UNDEFINED -> grey("unresolved &mdash; not defined here")
     }
 

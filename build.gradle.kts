@@ -56,4 +56,22 @@ tasks {
         useJUnit()
         systemProperty("idea.home.path", "")
     }
+
+    // Rebuilding while the sandbox runs must not half-break it.
+    //
+    // The sandbox defaults to hot-reloading the plugin whenever its jar
+    // changes, but this plugin is not unload-safe — the IDE says so itself:
+    // "class loader cannot be unloaded". The reload then leaves a live
+    // classloader that cannot find classes which are still present in the jar,
+    // and the symptom is a NoClassDefFoundError on every Ctrl-hover rather than
+    // anything that points at the cause. A rebuild now leaves the running
+    // sandbox alone; restart it to pick changes up.
+    runIde {
+        systemProperty("idea.auto.reload.plugins", "false")
+
+        // `-PideProject=/path/to/project` opens that project on start, which is
+        // how the plugin gets tried against a real repository rather than the
+        // fixture. Without it the sandbox reopens whatever it had last.
+        (project.findProperty("ideProject") as String?)?.let { args(it) }
+    }
 }

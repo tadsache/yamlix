@@ -21,6 +21,10 @@ import dev.yamlix.ansible.refs.AnsibleTargets
 import dev.yamlix.ansible.refs.AnsibleVariableReference
 import dev.yamlix.ansible.vars.AnsibleVarIndex
 import dev.yamlix.ansible.vars.ValueKind
+import dev.yamlix.ansible.vars.PathValue
+import dev.yamlix.ansible.vars.VarScope
+import dev.yamlix.ansible.vars.VariablePath
+import dev.yamlix.ansible.vars.VariablePathWalk
 import dev.yamlix.ansible.vars.VarDefinitionData
 import dev.yamlix.ansible.vars.VarFileRole
 import dev.yamlix.ansible.vars.VariableReport
@@ -108,7 +112,7 @@ class FileVariableViewService(private val project: Project) {
         val reports = VariableReportBuilder.getInstance(project)
         val reachedBy = if (inventoryRoot != null) emptyList() else reports.playbooksFor(file)
 
-        return ViewState.Ready(FileVariableView(
+        val view = FileVariableView(
             title = file.name,
             base = layout.cfgFor(file)?.baseDir,
             subtitle = subtitleFor(file),
@@ -116,7 +120,11 @@ class FileVariableViewService(private val project: Project) {
             runsOn = if (inventoryRoot != null) null else runsOn(file, reachedBy),
             uses = psi?.let { yaml ->
                 usedVariables(yaml).map { (name, usage) ->
-                    row(name, usage.element, usage.ranges, defined = false)
+                    row(
+                        name, usage.element, usage.ranges, defined = false,
+                        root = usage.root, segments = usage.segments,
+                        defaulted = usage.defaulted,
+                    )
                 }
             }.orEmpty(),
             defines = definedVariables(file).map { (name, usage) ->
@@ -125,7 +133,18 @@ class FileVariableViewService(private val project: Project) {
             plays = psi?.let { playOutlines(file, it) }.orEmpty(),
             imports = psi?.let { playImports(file, it) }.orEmpty(),
             groups = inventoryRoot?.let { groupOutlines(file, it) }.orEmpty(),
-        ))
+        )
+
+        // A file in which nothing resolves is either a real finding or an
+        // empty index, and the two look identical on screen. Only the second
+        // is actionable, so it is worth the check — which costs nothing unless
+        // everything is already unresolved.
+        val everythingUnresolved = view.uses.isNotEmpty() &&
+            view.uses.all { it.status == RowStatus.UNRESOLVED }
+        if (IndexHealth.looksBroken(project, file, everythingUnresolved)) {
+            return ViewState.IndexUnavailable
+        }
+        return ViewState.Ready(view)
     }
 
     // ---- what an inventory declares -----------------------------------------
@@ -337,6 +356,27 @@ class FileVariableViewService(private val project: Project) {
     /** Where a variable appears in the file, and an element to resolve it at. */
     private class Usage(val element: com.intellij.psi.PsiElement) {
         val ranges = ArrayList<IntRange>()
+
+        /**
+         * The root name, and the attribute chain written after it.
+         *
+         * `user.name` and `user.shell` are two entries with the same root: one
+         * dictionary, and two questions about it that have different answers.
+         * Collapsing them under `user`, which is what recording only the root
+         * did, showed one row where a file had fourteen distinct facts in it.
+         */
+        var root: String = ""
+        var segments: List<String> = emptyList()
+
+        /**
+         * True when every occurrence supplies a `| default(...)`.
+         *
+         * A key that is absent on purpose is idiomatic Ansible, and a missing
+         * one that the use already defaults is not worth a word of alarm. Every
+         * occurrence, not any: if the same path is written once with a default
+         * and once without, the one without is the interesting one.
+         */
+        var defaulted: Boolean = true
     }
 
     /**
@@ -350,10 +390,23 @@ class FileVariableViewService(private val project: Project) {
         val found = LinkedHashMap<String, Usage>()
         for (scalar in PsiTreeUtil.findChildrenOfType(psi, YAMLScalar::class.java)) {
             if (!scalar.textContains('{')) continue
+            val text = scalar.text
             for (range in AnsibleVariableReference.identifierRanges(scalar)) {
-                val name = range.substring(scalar.text)
+                val root = range.substring(text)
+                // Read straight off the scalar text: a path is `.name` chars
+                // that immediately follow, and the closing `}}` stops it as
+                // surely as any other character that is not a dot.
+                val segments = VariablePath.segmentsAfter(text, range.endOffset)
+                val name = VariablePath.render(root, segments)
+                val width = segments.sumOf { it.length + 1 }
                 val absolute = range.shiftRight(scalar.textOffset)
-                found.getOrPut(name) { Usage(scalar) }.ranges += absolute.startOffset until absolute.endOffset
+                val usage = found.getOrPut(name) {
+                    Usage(scalar).also { it.root = root; it.segments = segments }
+                }
+                usage.ranges += absolute.startOffset until (absolute.endOffset + width)
+                usage.defaulted = usage.defaulted && VariablePath
+                    .enclosingBlock(text, range.startOffset)
+                    ?.let(VariablePath::hasDefaultFilter) == true
             }
         }
         return found.toList()
@@ -383,11 +436,15 @@ class FileVariableViewService(private val project: Project) {
         element: com.intellij.psi.PsiElement,
         ranges: List<IntRange>,
         defined: Boolean,
+        root: String = name,
+        segments: List<String> = emptyList(),
+        defaulted: Boolean = false,
     ): VariableRow {
         ProgressManager.checkCanceled()
         val builder = VariableReportBuilder.getInstance(project)
-        val reports = builder.buildAll(name, element)
-        val sites = sitesFor(name, element)
+        val reports = builder.buildAll(root, element)
+        val sites = sitesFor(root, element)
+
 
         val kinds = reports.flatMap { it.rows }.map { it.kind }.toSet()
         val magic = reports.firstNotNullOfOrNull { it.magic }
@@ -398,6 +455,11 @@ class FileVariableViewService(private val project: Project) {
         // point is that it is one of 7, 14, 30 or 3.
         val values = reports.flatMap { it.rows }.mapNotNull { it.value }.distinct()
             .ifEmpty { sites.filter { it.status != SiteStatus.NOT_IN_SCOPE }.mapNotNull { it.value } }
+            // A definition no play reaches resolves to nothing, and reading
+            // "unresolved" off a line that plainly says `retention_days: 30` is
+            // not something a reader can make sense of. The file's own value is
+            // both true and the one thing they came for.
+            .ifEmpty { if (defined) sites.mapNotNull { it.value } else emptyList() }
             .distinct()
 
         val ownSite = if (defined) {
@@ -410,24 +472,163 @@ class FileVariableViewService(private val project: Project) {
             defined && ownSite != null && ownSite.status == SiteStatus.OVERRIDDEN -> RowStatus.NEVER_WINS
             magic != null -> RowStatus.PROVIDED_BY_ANSIBLE
             kinds.isEmpty() || kinds == setOf(ValueKind.UNDEFINED) -> RowStatus.UNRESOLVED
+            kinds == setOf(ValueKind.RUNTIME) -> RowStatus.RUNTIME
+            kinds == setOf(ValueKind.LOOP_ITEM) -> RowStatus.LOOP_ITEM
             ValueKind.AMBIGUOUS in kinds -> RowStatus.AMBIGUOUS
             values.size > 1 -> RowStatus.VARIES
             else -> RowStatus.RESOLVED
+        }
+
+        // `user.name` is answered by resolving `user` — everything above — and
+        // then following the path into whichever definition of it won.
+        if (segments.isNotEmpty()) {
+            return pathRow(name, element, ranges, segments, status, reports, sites, defaulted)
         }
 
         return VariableRow(
             name = name,
             summary = summarise(values, status),
             status = status,
-            note = note(status, reports, magic),
+            note = note(status, reports, magic, defined),
             sites = sites,
             ranges = ranges,
         )
     }
 
+    /**
+     * The row for `user.name`, built from the row `user` would have had.
+     *
+     * A path can never be in better shape than its root: if `user` is
+     * undefined, or set at run time, or one entry of a loop, then so is every
+     * key inside it, and [rootStatus] is passed straight through. Only a root
+     * that actually resolved is worth walking into.
+     */
+    private fun pathRow(
+        name: String,
+        element: com.intellij.psi.PsiElement,
+        ranges: List<IntRange>,
+        segments: List<String>,
+        rootStatus: RowStatus,
+        reports: List<VariableReport>,
+        sites: List<VariableSite>,
+        defaulted: Boolean,
+    ): VariableRow {
+        if (rootStatus != RowStatus.RESOLVED && rootStatus != RowStatus.VARIES) {
+            return VariableRow(
+                name = name,
+                summary = summarise(emptyList(), rootStatus),
+                status = rootStatus,
+                note = note(rootStatus, reports, reports.firstNotNullOfOrNull { it.magic }),
+                sites = sites,
+                ranges = ranges,
+            )
+        }
+
+        val winners = reports.flatMap { it.rows }.mapNotNull { it.winner }.distinct()
+        val walk = VariablePathWalk(project) { intermediate ->
+            VariableReportBuilder.getInstance(project).buildAll(intermediate, element)
+                .flatMap { it.rows }.firstNotNullOfOrNull { it.winner }
+        }
+        val outcomes = winners.map { walk.walk(it, segments) }.distinct()
+        val found = outcomes.filterIsInstance<PathValue.Found>()
+
+        // Several definitions of the root win in different places and disagree
+        // about the key: that is the same "differs by host" the root reports,
+        // and picking one of them would be the guess this plugin does not make.
+        val values = found.mapNotNull { it.value }.distinct()
+        val status = when {
+            found.isEmpty() -> RowStatus.PARTIAL
+            values.size > 1 -> RowStatus.VARIES
+            else -> RowStatus.RESOLVED
+        }
+
+        // The ladder survives: every definition of the root keeps its rung and
+        // its scope label, and only the line it points at moves inward to the
+        // key that was actually asked about.
+        val ladder = sites.map { site ->
+            when (val leaf = walk.walkFrom(site.file, site.offset, segments)) {
+                is PathValue.Found -> site.copy(
+                    value = leaf.value,
+                    file = leaf.file,
+                    offset = leaf.offset,
+                )
+                else -> site.copy(value = null)
+            }
+        }
+        return VariableRow(
+            name = name,
+            summary = if (status == RowStatus.PARTIAL) {
+                "unresolved beyond ${name.substringBeforeLast('.')}"
+            } else {
+                summarise(values, status)
+            },
+            status = status,
+            // Once the key is found the row is an ordinary one and reads like
+            // every other: only a path that could not be followed needs to
+            // explain itself.
+            note = if (status == RowStatus.PARTIAL) {
+                pathNote(outcomes, segments, defaulted)
+            } else {
+                note(status, reports, magic = null)
+            },
+            sites = ladder,
+            ranges = ranges,
+        )
+    }
+
+    /**
+     * Why a path could not be followed, said in checkable terms.
+     *
+     * The failing segment and the file consulted are both named, and neither is
+     * decoration. "The winning definition has no `owner` key" reads as a fact
+     * about the project; on algo it was a fact about a *test fixture* that the
+     * resolver had picked as the winner because the real definition lives in an
+     * unindexed `config.cfg`. Naming the file turns a claim the reader has to
+     * take on trust into one they can check in a second — and naming the
+     * segment that actually failed stops the note blaming the last key in the
+     * chain for a walk that stopped at the first.
+     */
+    private fun pathNote(
+        outcomes: List<PathValue>,
+        segments: List<String>,
+        defaulted: Boolean,
+    ): String? {
+        if (outcomes.any { it is PathValue.Found }) return null
+        val missing = outcomes.filterIsInstance<PathValue.NoSuchKey>().firstOrNull()
+        if (missing != null) {
+            val where = "`${missing.key}` in ${missing.file.name}"
+            // Absent *and* defaulted at the use is how optional keys are
+            // written, not a defect; saying so plainly keeps the row from
+            // reading as a finding against correct code.
+            return if (defaulted) {
+                "no $where, and the use defaults it"
+            } else {
+                "no $where"
+            }
+        }
+        val flat = outcomes.filterIsInstance<PathValue.NotAMapping>().firstOrNull()
+        if (flat != null) {
+            return "the value in ${flat.file.name} is not a dictionary, so `${flat.key}` " +
+                "is not a key in it"
+        }
+        return "the value it resolves to could not be followed statically"
+    }
+
     private fun summarise(values: List<String>, status: RowStatus): String {
         if (status == RowStatus.PROVIDED_BY_ANSIBLE) return "provided by Ansible"
-        if (status == RowStatus.UNRESOLVED) return "unresolved"
+        // Unless the row is a definition, which always has a value to show —
+        // its own. "Unresolved" beside `some_tuning_knob: 42` describes the
+        // resolver's reach, not the file, and reads as though the line were
+        // broken.
+        if (status == RowStatus.UNRESOLVED && values.isEmpty()) return "unresolved"
+        // Deliberately no value: there is none until the task runs.
+        if (status == RowStatus.RUNTIME) return "set at run time"
+        // The entry has no static value either, but the collection it comes
+        // from does, and naming it is the whole point of the distinction.
+        if (status == RowStatus.LOOP_ITEM) {
+            return values.singleOrNull()?.let { "each entry of ${shorten(it)}" }
+                ?: "one entry per loop iteration"
+        }
         if (values.isEmpty()) return "no static value"
         if (values.size == 1) return shorten(values.single())
 
@@ -448,10 +649,23 @@ class FileVariableViewService(private val project: Project) {
         status: RowStatus,
         reports: List<VariableReport>,
         magic: dev.yamlix.ansible.vars.MagicVariable?,
+        defined: Boolean = false,
     ): String? = when (status) {
         RowStatus.NEVER_WINS -> "never wins — something always overrides it"
         RowStatus.PROVIDED_BY_ANSIBLE -> magic?.description
-        RowStatus.UNRESOLVED -> "not defined in this project"
+        // "Not defined in this project" about a line that defines it, in the
+        // file it is written in, is a contradiction a reader has to stop and
+        // argue with. What is true of a definition nothing reaches is that no
+        // play brings it into scope — which is a real finding, and a different
+        // one.
+        RowStatus.UNRESOLVED -> if (defined) {
+            "defined here, but no play brings this file into scope"
+        } else {
+            "not defined in this project"
+        }
+        RowStatus.RUNTIME ->
+            reports.flatMap { it.rows }.firstNotNullOfOrNull { it.note }
+                ?: "set at run time by a task"
         // From an *ambiguous* row, not merely the first row that happens to
         // carry a note. A variable can be ambiguous under one inventory and
         // undefined under another, and taking whichever note came first put
@@ -464,7 +678,15 @@ class FileVariableViewService(private val project: Project) {
                 .filter { it.kind == ValueKind.AMBIGUOUS }
                 .firstNotNullOfOrNull { it.note }
                 ?: "several sites could win; the outcome depends on run-time state"
+        RowStatus.LOOP_ITEM ->
+            reports.flatMap { it.rows }
+                .filter { it.kind == ValueKind.LOOP_ITEM }
+                .firstNotNullOfOrNull { it.note }
+                ?: "one entry per loop iteration"
         RowStatus.VARIES -> "differs by host"
+        // Always supplied by `pathRow`, which is the only thing that produces
+        // this status and knows why it did.
+        RowStatus.PARTIAL -> null
         RowStatus.RESOLVED -> null
     }
 
@@ -515,6 +737,33 @@ class FileVariableViewService(private val project: Project) {
             },
             com.intellij.psi.search.GlobalSearchScope.allScope(project),
         )
+
+        // A `vars_files:` the index cannot see contributes no candidate to the
+        // loop above, so a variable that resolves perfectly well out of one
+        // showed its value with no account of where it came from. The sites
+        // come from the resolver for exactly the playbooks that reach here.
+        val resolver = VariableResolutionService.getInstance(project)
+        for (playbook in builder.playbooksFor(PlayStructure.sourceFile(position) ?: return out)) {
+            for ((file, definition) in resolver.unindexedVarsFileSites(name, playbook)) {
+                val scope = scopes["${file.path}#${definition.offset}"]
+                out += VariableSite(
+                    status = if (scope?.winsOn.orEmpty().isNotEmpty()) {
+                        SiteStatus.WINS
+                    } else if (scope?.inScope == true) {
+                        SiteStatus.OVERRIDDEN
+                    } else {
+                        SiteStatus.NOT_IN_SCOPE
+                    },
+                    flowSensitive = false,
+                    value = definition.valueText ?: nestedValue(file, definition.offset),
+                    file = file,
+                    offset = definition.offset,
+                    where = scope?.winsOn.orEmpty(),
+                    scopeLabel = definition.scope.display,
+                    scopeRank = definition.scope.rank,
+                )
+            }
+        }
 
         // Same rule as "Choose Declaration": a same-named variable in an
         // unrelated role is here only because Ansible's namespace is global,

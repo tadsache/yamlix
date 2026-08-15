@@ -69,6 +69,18 @@ class InventoryGraph(
         hostsInGroupCache.getOrPut(group) { hostGroups.filterValues { group in it }.keys }
 
     companion object {
+        /**
+         * The inventory of a project that has none.
+         *
+         * Not every Ansible project ships an inventory — a role repository, a
+         * collection, or anything run with `-i` supplied at the command line.
+         * Resolution still has real answers for such a project, since a role's
+         * defaults do not depend on which host runs them, and this stands in so
+         * that "no inventory" is a graph with no hosts rather than a null the
+         * resolver has to branch on everywhere.
+         */
+        val EMPTY = InventoryGraph("(no inventory)", emptyMap(), emptyMap())
+
         const val ALL = "all"
         const val PRIORITY_VAR = "ansible_group_priority"
         const val DEFAULT_PRIORITY = 1

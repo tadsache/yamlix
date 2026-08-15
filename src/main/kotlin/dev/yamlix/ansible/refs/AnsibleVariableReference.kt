@@ -197,6 +197,21 @@ class AnsibleVariableReference(
                     val before = expression.take(identifier.range.first).trimEnd()
                     // Skip attribute access (`foo.bar`) and filter names (`| int`).
                     if (before.endsWith('.') || before.endsWith('|')) continue
+
+                    // Skip what is being called, not read. `lookup('file', x)`,
+                    // `q('...')`, `range(3)` — the name belongs to Jinja, not to
+                    // the project, and reporting it as an undefined variable was
+                    // among the commonest false findings on real repositories.
+                    val after = expression.drop(identifier.range.last + 1).trimStart()
+                    if (after.startsWith('(')) continue
+
+                    // Skip the name of a test: `result is changed`, `x is not
+                    // defined`. Those follow `is`, and are Jinja's vocabulary.
+                    if (before.endsWith(" is") || before.endsWith(" is not") ||
+                        before == "is" || before == "is not"
+                    ) {
+                        continue
+                    }
                     // Skip anything inside a string literal.
                     if (before.count { it == '\'' } % 2 == 1) continue
                     if (before.count { it == '"' } % 2 == 1) continue

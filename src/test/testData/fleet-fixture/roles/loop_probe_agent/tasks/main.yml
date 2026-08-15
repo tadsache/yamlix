@@ -1,0 +1,16 @@
+---
+# NAV: F20 — `probe_target` is bound by the *caller's* loop. Nothing in this
+# role defines it and nothing ever will; the only record of it anywhere is the
+# `loop_control:` of the task that includes the role.
+- name: Probe one target
+  ansible.builtin.debug:
+    msg: "Probing {{ probe_target }} for {{ probe_interval }}s"
+
+# ...while `probe_port` is bound by a loop right here, and stops applying at
+# the end of this task.
+- name: Probe each port
+  ansible.builtin.debug:
+    msg: "port {{ probe_port }}"
+  loop: "{{ probe_ports }}"
+  loop_control:
+    loop_var: probe_port

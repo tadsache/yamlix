@@ -19,6 +19,16 @@ sealed interface ViewState {
     object Indexing : ViewState
 
     /**
+     * The variable index is empty while the project plainly defines variables.
+     *
+     * A broken index answers every lookup with nothing, which renders as a
+     * correct project in which nothing is defined anywhere. Naming it lets the
+     * reader act on it — invalidating caches fixes it — instead of doubting
+     * their own repository.
+     */
+    object IndexUnavailable : ViewState
+
+    /**
      * An Ansible file the IDE does not index, because it sits outside the
      * project's content roots.
      *
@@ -182,6 +192,33 @@ enum class RowStatus {
 
     /** Ansible supplies it itself: a loop item, a fact, a magic variable. */
     PROVIDED_BY_ANSIBLE,
+
+    /**
+     * Produced by a task in this project — `register:` or `set_fact` — so it
+     * has no value until Ansible runs. Not the same as undefined, and saying
+     * so is the difference between naming the task and accusing the repo.
+     */
+    RUNTIME,
+
+    /**
+     * Bound by a `loop:` — one entry of a collection, per iteration.
+     *
+     * Kept apart from [RUNTIME] because the follow-up question differs: for a
+     * registered value it is "which task produced it", and for this one it is
+     * "what is in that collection", which is a question the plugin can answer.
+     */
+    LOOP_ITEM,
+
+    /**
+     * The variable resolves, but the key written after the dot does not.
+     *
+     * Kept apart from [UNRESOLVED] because it is a narrower and less alarming
+     * statement: `user` was found, and only `user.shell` could not be followed
+     * — usually because the value it lands on is templated, sometimes because
+     * the winning dictionary genuinely has no such key. Reporting the whole
+     * thing as undefined would blame the root, which is fine.
+     */
+    PARTIAL,
 
     /** Nothing defines it and Ansible does not supply it either. */
     UNRESOLVED,

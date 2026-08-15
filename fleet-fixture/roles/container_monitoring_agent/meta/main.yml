@@ -1,0 +1,13 @@
+---
+# NAV: F21 — the inline form. `probe_label` is a parameter; `when:` beside it
+# is a directive Ansible reads itself and is not a variable.
+#
+# NAV: F22 — `probe_repo` is handed over as a *template*, which is how a
+# parameterised role is written in the wild (kubespray: `user: "{{
+# addusers.etcd }}"`). Reading `probe_repo.url` inside the role therefore has
+# to follow the hop to `artifact_repo` before the key means anything.
+dependencies:
+  - role: inline_param_agent
+    probe_label: container-fleet
+    probe_repo: "{{ artifact_repo }}"
+    when: true

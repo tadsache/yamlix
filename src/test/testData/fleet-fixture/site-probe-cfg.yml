@@ -1,0 +1,9 @@
+---
+# NAV: F25 — the only thing that makes `probe-settings.cfg` a vars file.
+- hosts: containers
+  vars_files:
+    - probe-settings.cfg
+  tasks:
+    - name: Read a value from an unindexed vars file
+      ansible.builtin.debug:
+        msg: "cfg says {{ probe_cfg_setting }}"

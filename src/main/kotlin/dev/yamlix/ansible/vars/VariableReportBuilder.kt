@@ -6,12 +6,14 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiManager
+import com.intellij.psi.util.PsiTreeUtil
 import dev.yamlix.ansible.inventory.InventoryGraph
 import dev.yamlix.ansible.inventory.InventoryGraphService
 import dev.yamlix.ansible.layout.AnsibleLayoutService
 import dev.yamlix.ansible.psi.PlayStructure
 import dev.yamlix.ansible.refs.AnsibleTargets
 import org.jetbrains.yaml.psi.YAMLFile
+import org.jetbrains.yaml.psi.YAMLKeyValue
 import org.jetbrains.yaml.psi.YAMLMapping
 import org.jetbrains.yaml.psi.YAMLScalar
 import org.jetbrains.yaml.psi.YAMLSequence
@@ -69,6 +71,9 @@ class VariableReportBuilder(private val project: Project) {
             VarScope.ROLE_DEFAULTS, VarScope.ROLE_VARS, VarScope.ROLE_PARAM,
             VarScope.PLAY_VARS, VarScope.VARS_FILE,
         )
+
+        /** Task keys that pull in a role without listing it under `roles:`. */
+        private val INCLUDE_ROLE_KEYS = setOf("include_role", "import_role")
 
         /** Expressions whose value can never be known without running Ansible. */
         private val RUNTIME_ONLY = listOf("hostvars", "lookup(", "query(", "vault", "ansible_facts")
@@ -132,16 +137,114 @@ class VariableReportBuilder(private val project: Project) {
             }
         }
 
-        if (inventoryRoots.isEmpty()) {
-            caveats += "no inventory found; values shown without a host context"
+        // A project with no inventory is not a project with no variables. Its
+        // role defaults, role vars and play vars say what they say wherever it
+        // runs, and resolving none of them reported entire correct projects as
+        // undefined. What genuinely needs a host — group_vars, host_vars — is
+        // left out rather than guessed at.
+        if (rows.isEmpty()) {
+            val resolution = resolver.resolveHostless(name, playbook, position)
+            resolution.caveats.forEach(caveats::add)
+            rows += row(inventory = null, hosts = emptyList(), whole = true, resolution = resolution)
+            caveats += if (inventoryRoots.isEmpty()) {
+                "no inventory found; host-dependent definitions cannot apply"
+            } else {
+                "no hosts in the inventory; host-dependent definitions cannot apply"
+            }
         }
-        val merged = mergeRowsAcrossInventories(rows, inventoryRoots.size)
+        // Nothing in the repo defines it — but "not defined in this project" is
+        // only one of the reasons for that, and the least common one on real
+        // repositories. A loop binding or a `register:` explains the name
+        // completely; both are checked before the report settles for undefined.
+        val resolved = if (rows.all { it.kind == ValueKind.UNDEFINED }) {
+            loopRow(name, position, file, rows)
+                ?: runtimeRow(name, file, rows)
+                ?: rows
+        } else {
+            rows
+        }
+
+        val merged = mergeRowsAcrossInventories(resolved, inventoryRoots.size)
         val magic = if (merged.all { it.kind == ValueKind.UNDEFINED }) {
             AnsibleMagicVariables.lookup(name)
         } else {
             null
         }
         return VariableReport(name, listOfNotNull(playbook), merged, caveats.toList(), magic)
+    }
+
+    /**
+     * The single row for a name that a loop binds, or null when none does.
+     *
+     * Checked ahead of [runtimeRow] because it is the more specific answer: a
+     * loop variable that happens to share a name with something a task in the
+     * same role registers is still the loop's, at the position being asked
+     * about.
+     *
+     * The two sources are complementary rather than alternatives — a role can
+     * be included in a loop by one caller and loop internally in another file —
+     * so a local binding is preferred (it is exact about where it applies) and
+     * the callers are named when there is none.
+     */
+    private fun loopRow(
+        name: String,
+        position: PsiElement,
+        file: VirtualFile?,
+        rows: List<ReportRow>,
+    ): List<ReportRow>? {
+        val resolver = VariableResolutionService.getInstance(project)
+        val local = LoopVariables.localBinding(position, name)
+        val callers = if (local != null) emptyList() else resolver.loopBindings(name, file)
+        if (local == null && callers.isEmpty()) return null
+
+        val collection = local?.collection ?: callers.firstNotNullOfOrNull { it.collection }
+        val where = when {
+            local != null -> "a loop in this file"
+            else -> callers.map { it.file.name }.distinct().joinToString(", ")
+        }
+        // Several callers may loop the same role over different collections;
+        // naming one of them as *the* collection would be a guess, so the note
+        // says only where to look.
+        val agreed = callers.mapNotNull { it.collection }.distinct().size <= 1
+        return listOf(
+            ReportRow(
+                inventory = rows.firstOrNull()?.inventory,
+                hosts = rows.firstOrNull()?.hosts.orEmpty(),
+                coversWholeInventory = true,
+                kind = ValueKind.LOOP_ITEM,
+                value = if (local != null || agreed) collection else null,
+                winner = null,
+                alternatives = emptyList(),
+                note = "one entry per iteration, from $where",
+            )
+        )
+    }
+
+    /**
+     * The single row for a name some task registers or sets, or null.
+     *
+     * Deliberately carries no value — there is none until Ansible runs — while
+     * still naming the task that produces it, which is the actionable half.
+     */
+    private fun runtimeRow(
+        name: String,
+        file: VirtualFile?,
+        rows: List<ReportRow>,
+    ): List<ReportRow>? {
+        val origins = VariableResolutionService.getInstance(project).runtimeOrigins(name, file)
+        if (origins.isEmpty()) return null
+        return listOf(
+            ReportRow(
+                inventory = rows.firstOrNull()?.inventory,
+                hosts = rows.firstOrNull()?.hosts.orEmpty(),
+                coversWholeInventory = true,
+                kind = ValueKind.RUNTIME,
+                value = null,
+                winner = null,
+                alternatives = emptyList(),
+                note = "set at run time by a task in " + origins.joinToString(", ") { it.name },
+            )
+        )
     }
 
     /**
@@ -457,7 +560,8 @@ class VariableReportBuilder(private val project: Project) {
     }
 
     private fun row(
-        inventory: String,
+        /** Null when there is no inventory to attribute the row to. */
+        inventory: String?,
         hosts: List<String>,
         whole: Boolean,
         resolution: VarResolution,
@@ -483,6 +587,10 @@ class VariableReportBuilder(private val project: Project) {
             ValueKind.TEMPLATE -> templateNote(value!!)
             ValueKind.AMBIGUOUS -> winner?.conditionReason
                 ?: "several sites could win; the outcome depends on run-time state"
+            // Never produced here: a loop binding is not a definition, so it
+            // never reaches precedence and never becomes a winner. Its rows are
+            // built whole by `loopRow`, note included.
+            ValueKind.LOOP_ITEM -> null
             ValueKind.LITERAL -> null
         }
 
@@ -583,14 +691,25 @@ class VariableReportBuilder(private val project: Project) {
                 roleNameOf(item.value)?.let { if (names.add(it)) queue += it }
             }
         }
-        // Roles reached through meta dependencies and include_role are equally
-        // "in" the playbook for documentation purposes.
+        // A playbook that only ever says `include_role:` lists no roles at all,
+        // and reading `roles:` alone declared every role it reaches unused —
+        // an accusation against a perfectly ordinary playbook.
+        for (name in includedRoleNames(psi)) if (names.add(name)) queue += name
+
         var guard = 0
         while (queue.isNotEmpty() && guard++ < 200) {
             val current = queue.removeFirst()
             val dir = AnsibleTargets.resolveRoleDirs(current, playbook, project).firstOrNull()
                 ?: continue
             names += dir.name
+            // Transitively: a role reached here may include others, and they
+            // are as reached as it is.
+            dir.findChild("tasks")?.children.orEmpty()
+                .filter { !it.isDirectory }
+                .mapNotNull { manager.findFile(it) as? YAMLFile }
+                .flatMap(::includedRoleNames)
+                .forEach { if (names.add(it)) queue += it }
+
             val meta = dir.findFileByRelativePath("meta/main.yml") ?: continue
             val metaPsi = manager.findFile(meta) as? YAMLFile ?: continue
             val root = metaPsi.documents.mapNotNull { it.topLevelValue as? YAMLMapping }
@@ -602,6 +721,25 @@ class VariableReportBuilder(private val project: Project) {
         }
         return names.map { it.substringAfterLast('.') }.toSet()
     }
+
+    /**
+     * Every role named by an `include_role:`/`import_role:` anywhere in [psi].
+     *
+     * Found by walking the file rather than the task phases, because these
+     * appear inside `block:`, `rescue:`, and included task files at any depth,
+     * and the question here is only "is this role reached at all" — a coarser
+     * question than execution order, and one a flat walk answers correctly.
+     *
+     * A templated name (`include_role: name: "{{ role }}"`) is skipped: which
+     * role it reaches is not knowable, and guessing at one would be worse than
+     * the missing edge.
+     */
+    private fun includedRoleNames(psi: YAMLFile): List<String> =
+        PsiTreeUtil.findChildrenOfType(psi, YAMLKeyValue::class.java)
+            .filter { it.keyText.trim().substringAfterLast('.') in INCLUDE_ROLE_KEYS }
+            .mapNotNull { roleNameOf(it.value) }
+            .filterNot { it.contains("{{") }
+            .map { it.substringAfterLast('.') }
 
     private fun roleNameOf(value: PsiElement?): String? = when (value) {
         is YAMLMapping -> value.getKeyValueByKey("role")?.valueText?.trim()

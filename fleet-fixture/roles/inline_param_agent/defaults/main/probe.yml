@@ -1,0 +1,5 @@
+---
+# NAV: F24 — `defaults/main/` is a *directory*, which Ansible loads whole. A
+# role with a large surface splits its defaults this way; kubespray's central
+# `kubespray_defaults` role is written exactly like this.
+probe_prefix: split-defaults

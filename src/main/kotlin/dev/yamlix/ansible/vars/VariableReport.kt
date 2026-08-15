@@ -16,6 +16,16 @@ enum class ValueKind {
     /** `register:` — the value only exists once the task has run. */
     RUNTIME,
 
+    /**
+     * Bound by a loop: one entry of a collection, different every iteration.
+     *
+     * Distinct from [RUNTIME] because the useful half of the answer survives —
+     * the collection being looped over is written in the repo and can itself be
+     * resolved, so "each entry of `{{ users }}`" is sayable where "set at run
+     * time" would throw that away.
+     */
+    LOOP_ITEM,
+
     /** Several sites could win; which one does depends on a fact or a guard. */
     AMBIGUOUS,
 
@@ -28,7 +38,8 @@ enum class ValueKind {
  * that all resolve identically.
  */
 data class ReportRow(
-    val inventory: String,
+    /** The inventory this row is about, or null when the project has none. */
+    val inventory: String?,
     val hosts: List<String>,
     /** True when every host in this inventory shares this row. */
     val coversWholeInventory: Boolean,

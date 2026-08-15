@@ -86,7 +86,7 @@
         <toolWindow
             id="Ansible"
             anchor="right"
-            icon="AllIcons.Toolwindows.ToolWindowStructure"
+            icon="/icons/ansibleToolWindow.svg"
             factoryClass="dev.yamlix.ansible.overview.AnsibleToolWindowFactory"/>
 
         <localInspection
