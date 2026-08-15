@@ -41,7 +41,35 @@ class AnsibleLayoutService(private val project: Project) {
         private val CFG_CACHE_KEY =
             Key.create<CachedValue<ConcurrentHashMap<String, Any>>>("yamlix.ansible.cfgCache")
 
+        private val PLAYBOOK_CACHE_KEY =
+            Key.create<CachedValue<ConcurrentHashMap<String, List<VirtualFile>>>>(
+                "yamlix.ansible.playbooks",
+            )
+
         private val NONE = Any()
+
+        /** Depth below `ansible.cfg` worth walking for playbooks. */
+        private const val MAX_PLAYBOOK_DEPTH = 5
+
+        /**
+         * Directories that cannot contain a playbook, skipped without opening
+         * anything inside them.
+         *
+         * The role subdirectories matter most: `tasks/main.yml` is a task list,
+         * not a playbook, and there is one per role. Everything else here is a
+         * data or plugin tree whose YAML is never a play.
+         */
+        private val NON_PLAYBOOK_DIRS = setOf(
+            // role trees, and role internals wherever else they appear
+            "roles", "tasks", "handlers", "defaults", "vars", "meta", "files", "templates",
+            // inventory and variable data
+            "inventories", "inventory", "group_vars", "host_vars",
+            // plugin and dependency trees
+            "library", "module_utils", "collections", "ansible_collections",
+            "filter_plugins", "lookup_plugins", "action_plugins", "callback_plugins",
+            // build and tooling output
+            "build", "target", "node_modules", "venv", "molecule",
+        )
     }
 
     // ---- ansible.cfg -------------------------------------------------------
@@ -162,26 +190,67 @@ class AnsibleLayoutService(private val project: Project) {
     // ---- inventories -------------------------------------------------------
 
     /**
-     * Playbooks in the project: YAML files directly under the `ansible.cfg`
-     * directory or under a `playbooks/` subdirectory, whose shape says playbook.
+     * Every YAML file under the `ansible.cfg` directory whose shape says
+     * playbook.
      *
-     * Scanning is limited to those two locations on purpose — a recursive walk
-     * would parse every role's `tasks/main.yml` on each call, and playbooks
-     * living somewhere else are rare enough to be worth the miss.
+     * This used to scan only the base directory and `playbooks/`, both
+     * non-recursively, to avoid "parsing every role's `tasks/main.yml` on each
+     * call". That reasoning conflates two separable costs. Walking directories
+     * is cheap; *parsing* is what hurts — so the walk skips the directories
+     * that structurally cannot hold a playbook ([NON_PLAYBOOK_DIRS]: role
+     * subdirectories, inventories, vars trees, plugin trees) and never opens a
+     * file inside them. And "on each call" is now false: the result is cached
+     * until the PSI or the layout changes.
+     *
+     * The miss it was accepting is not as rare as the comment assumed — a
+     * `playbooks/<area>/site-*.yml` layout is ordinary, and the plugin silently
+     * treated those playbooks as though they did not exist.
      */
     fun playbooks(from: VirtualFile): List<VirtualFile> {
         val base = cfgFor(from)?.baseDir ?: return emptyList()
-        val manager = com.intellij.psi.PsiManager.getInstance(project)
-        val candidates = base.children.filter { !it.isDirectory } +
-            (base.findChild("playbooks")?.children?.filter { !it.isDirectory } ?: emptyList())
-        return candidates
-            .filter { it.extension == "yml" || it.extension == "yaml" }
-            .filter { file ->
-                (manager.findFile(file) as? org.jetbrains.yaml.psi.YAMLFile)
-                    ?.let(PlayStructure::isPlaybook) == true
-            }
-            .sortedBy { it.name }
+        return playbookCache().getOrPut(base.path) { scanPlaybooks(base) }
     }
+
+    private fun scanPlaybooks(base: VirtualFile): List<VirtualFile> {
+        val manager = com.intellij.psi.PsiManager.getInstance(project)
+        val found = ArrayList<VirtualFile>()
+        // Canonical paths, so a symlinked directory — `playbooks/x/roles ->
+        // ../../roles` is the common one — cannot be walked twice or forever.
+        val visited = HashSet<String>()
+
+        fun walk(dir: VirtualFile, depth: Int) {
+            if (depth > MAX_PLAYBOOK_DEPTH) return
+            if (!visited.add(dir.canonicalPath ?: dir.path)) return
+            for (child in dir.children) {
+                if (child.isDirectory) {
+                    if (child.name.startsWith(".")) continue
+                    if (child.name.lowercase() in NON_PLAYBOOK_DIRS) continue
+                    walk(child, depth + 1)
+                    continue
+                }
+                if (child.extension != "yml" && child.extension != "yaml") continue
+                val psi = manager.findFile(child) as? org.jetbrains.yaml.psi.YAMLFile ?: continue
+                if (PlayStructure.isPlaybook(psi)) found += child
+            }
+        }
+
+        walk(base, 0)
+        return found.sortedBy { it.path }
+    }
+
+    private fun playbookCache(): ConcurrentHashMap<String, List<VirtualFile>> =
+        CachedValuesManager.getManager(project).getCachedValue(
+            project,
+            PLAYBOOK_CACHE_KEY,
+            {
+                CachedValueProvider.Result.create(
+                    ConcurrentHashMap<String, List<VirtualFile>>(),
+                    PsiModificationTracker.MODIFICATION_COUNT,
+                    AnsibleLayoutTracker,
+                )
+            },
+            false,
+        )
 
     /** [playbooks], or null when there are none, so callers can fall back. */
     fun playbooksOrNull(from: VirtualFile): List<VirtualFile>? =
