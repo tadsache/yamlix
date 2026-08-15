@@ -77,12 +77,25 @@ class VariableReportBuilder(private val project: Project) {
     fun buildAll(name: String, position: PsiElement): List<VariableReport> {
         val file = PlayStructure.sourceFile(position) ?: return emptyList()
         val playbooks = playbooksFor(file)
-        return if (playbooks.isEmpty()) {
-            listOf(build(name, position, null))
-        } else {
-            playbooks.map { build(name, position, it) }
-        }
+        if (playbooks.isEmpty()) return listOf(build(name, position, null))
+        return mergeIdenticalReports(playbooks.map { build(name, position, it) })
     }
+
+    /**
+     * Collapses reports that came out the same into one, listing the playbooks
+     * it holds for.
+     *
+     * Two playbooks that run the same role against the same hosts resolve a
+     * variable identically, so rendering both produced the same table twice —
+     * and a shared play imported by a dozen sites produced it a dozen times.
+     * The playbook only earns a heading when it actually changes the answer.
+     */
+    private fun mergeIdenticalReports(reports: List<VariableReport>): List<VariableReport> =
+        reports.groupBy { listOf(it.rows, it.caveats, it.magic) }
+            .values
+            .map { group ->
+                group.first().copy(playbooks = group.flatMap { it.playbooks }.distinct())
+            }
 
     private fun build(name: String, position: PsiElement, playbook: VirtualFile?): VariableReport {
         val file = PlayStructure.sourceFile(position)
@@ -122,24 +135,31 @@ class VariableReportBuilder(private val project: Project) {
         if (inventoryRoots.isEmpty()) {
             caveats += "no inventory found; values shown without a host context"
         }
-        val merged = mergeRowsCoveringEveryInventory(rows, inventoryRoots.size)
+        val merged = mergeRowsAcrossInventories(rows, inventoryRoots.size)
         val magic = if (merged.all { it.kind == ValueKind.UNDEFINED }) {
             AnsibleMagicVariables.lookup(name)
         } else {
             null
         }
-        return VariableReport(name, playbook, merged, caveats.toList(), magic)
+        return VariableReport(name, listOfNotNull(playbook), merged, caveats.toList(), magic)
     }
 
     /**
-     * Collapses per-inventory rows into one when they are all the exact same
-     * outcome for literally every inventory the project has.
+     * Collapses per-inventory rows into one wherever the outcome is the same in
+     * every inventory the project has.
      *
-     * `group_vars/all.yml` is the common case: with sixteen inventories the
-     * popup would otherwise render sixteen identical sections, one header per
-     * inventory, for a single value that never actually varies.
+     * `group_vars/all.yml` is the obvious case: sixteen inventories would
+     * otherwise render sixteen identical sections for a value that never
+     * varies. But it is not only whole-inventory rows that repeat. A role bound
+     * to a one-host group produces two rows per inventory — the targeted host,
+     * and everyone else undefined — identical in every inventory, so eight rows
+     * across four environments say exactly what two say.
+     *
+     * Merging is by outcome, and only when a signature appears once in every
+     * inventory. A row that differs anywhere keeps its own line, because that
+     * difference is the entire thing a reader is looking for.
      */
-    private fun mergeRowsCoveringEveryInventory(
+    private fun mergeRowsAcrossInventories(
         rows: List<ReportRow>,
         totalInventories: Int,
     ): List<ReportRow> {
@@ -147,14 +167,29 @@ class VariableReportBuilder(private val project: Project) {
         fun signature(row: ReportRow) =
             listOf(row.kind, row.value, row.winner?.file?.path, row.winner?.offset, row.note)
 
-        val group = rows.filter { it.coversWholeInventory }
-            .groupBy(::signature)
-            .values
-            .firstOrNull { it.size == totalInventories }
-            ?: return rows
+        val merged = HashSet<Int>()
+        val replacements = ArrayList<Pair<Int, ReportRow>>()
 
-        val merged = group.first().copy(inventory = "all inventories", hosts = emptyList())
-        return listOf(merged) + rows.filterNot { it in group }
+        for (group in rows.withIndex().groupBy { signature(it.value) }.values) {
+            // Once per inventory, in every inventory — otherwise the rows are
+            // not describing the same uniform outcome.
+            if (group.size != totalInventories) continue
+            if (group.map { it.value.inventory }.distinct().size != totalInventories) continue
+
+            group.forEach { merged += it.index }
+            replacements += group.first().index to group.first().value.copy(
+                inventory = "all inventories",
+                hosts = group.flatMap { it.value.hosts }.distinct(),
+                coversWholeInventory = group.all { it.value.coversWholeInventory },
+            )
+        }
+        if (merged.isEmpty()) return rows
+
+        // Keep each surviving row where it was, so the reading order does not
+        // shuffle just because something elsewhere collapsed.
+        return (rows.withIndex().filterNot { it.index in merged }.map { it.index to it.value } + replacements)
+            .sortedBy { it.first }
+            .map { it.second }
     }
 
     /**
@@ -428,7 +463,7 @@ class VariableReportBuilder(private val project: Project) {
         resolution: VarResolution,
     ): ReportRow {
         val winner = resolution.conditionalWinner ?: resolution.winner
-        val value = winner?.valueText
+        val value = winner?.let(::displayValue)
 
         val kind = when {
             winner == null -> ValueKind.UNDEFINED
@@ -482,6 +517,28 @@ class VariableReportBuilder(private val project: Project) {
         )
     }
 
+    /**
+     * The winning value as text.
+     *
+     * The index stores a scalar or nothing, so a variable whose value is a
+     * mapping or a sequence — `artifact_repo:` with nested keys — arrives here
+     * as null. Reading `null` as "no static value" then labelled it
+     * *registered at run time*, telling the reader a plain literal only exists
+     * during the play. It is read back off the PSI instead; genuinely
+     * value-less scopes are recognised by their scope, not by a null.
+     */
+    private fun displayValue(site: VarSite): String? {
+        site.valueText?.takeIf { it.isNotBlank() }?.let { return it }
+        if (site.scope == VarScope.REGISTERED) return null
+        val psi = PsiManager.getInstance(project).findFile(site.file) ?: return null
+        val keyValue = com.intellij.psi.util.PsiTreeUtil.getParentOfType(
+            psi.findElementAt(site.offset), org.jetbrains.yaml.psi.YAMLKeyValue::class.java, false,
+        ) ?: return null
+        // One line: the popup lays values out as free-flowing HTML, where the
+        // source indentation of a block mapping is lost anyway.
+        return keyValue.value?.text?.replace(Regex("\\s+"), " ")?.trim()?.ifBlank { null }
+    }
+
     private fun templateNote(value: String): String {
         val runtime = RUNTIME_ONLY.firstOrNull { value.contains(it) }
         return if (runtime != null) {
@@ -514,7 +571,7 @@ class VariableReportBuilder(private val project: Project) {
     }
 
     /** Every role a playbook pulls in, including via `meta` dependencies. */
-    private fun roleClosure(playbook: VirtualFile): Set<String> {
+    fun roleClosure(playbook: VirtualFile): Set<String> {
         val manager = PsiManager.getInstance(project)
         val psi = manager.findFile(playbook) as? YAMLFile ?: return emptySet()
         val names = LinkedHashSet<String>()

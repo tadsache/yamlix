@@ -41,10 +41,17 @@ data class ReportRow(
     val note: String?,
 )
 
-/** The whole table for one variable, under one playbook. */
+/**
+ * The whole table for one variable, under one or more playbooks.
+ *
+ * Plural because playbooks that resolve a variable identically are one answer,
+ * not several. A shared play imported by a dozen sites produced a dozen
+ * byte-identical tables; they collapse into one section listing the playbooks
+ * it holds for.
+ */
 data class VariableReport(
     val name: String,
-    val playbook: VirtualFile?,
+    val playbooks: List<VirtualFile>,
     val rows: List<ReportRow>,
     val caveats: List<String>,
     /**

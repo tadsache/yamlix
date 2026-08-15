@@ -60,10 +60,14 @@ object AnsibleVarDocumentation {
         html.append(DocumentationMarkup.CONTENT_END)
 
         for (report in reports) {
-            if (reports.size > 1 && report.playbook != null) {
+            // Only worth a heading when the playbook actually changes the
+            // answer — a single report needs no "via", and identical reports
+            // have already been merged into one listing every playbook it
+            // holds for.
+            if (reports.size > 1 && report.playbooks.isNotEmpty()) {
                 html.append(DocumentationMarkup.CONTENT_START)
                     .append("<p>").append(grey("via "))
-                    .append(escape(relative(report.playbook, base)))
+                    .append(escape(report.playbooks.joinToString(", ") { relative(it, base) }))
                     .append("</p>").append(DocumentationMarkup.CONTENT_END)
             }
             html.append(sections(report, base))

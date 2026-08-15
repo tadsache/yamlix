@@ -1,6 +1,7 @@
 package dev.yamlix.ansible
 
 import dev.yamlix.ansible.refs.AnsibleTargets
+import dev.yamlix.ansible.vars.ValueKind
 import dev.yamlix.ansible.vars.VariableReportBuilder
 
 /**
@@ -117,6 +118,82 @@ class FleetFixtureNavigationTest : FleetFixtureTestCase() {
             "must win on the 'containers' group, not on whole inventories",
             listOf("all inventories (containers)"),
             winning.winsOn,
+        )
+    }
+
+    /**
+     * F17 — playbooks that resolve a variable identically are one answer.
+     *
+     * `site-container-mon.yml` and `playbooks/fleet/site-fleet-extra.yml` both
+     * run `container_monitoring_agent` against `containers`, so they produce
+     * the same table. Rendering both showed it twice; on a project where a
+     * dozen sites import one shared play, a dozen times.
+     */
+    fun testIdenticalPerPlaybookReportsCollapse() {
+        val reference = variableReferenceAt(
+            "roles/container_monitoring_agent/tasks/main.yml", 16, "agent_image",
+        )
+        val reports = VariableReportBuilder.getInstance(project)
+            .buildAll("agent_image", reference.element)
+
+        assertEquals("both playbooks resolve it identically", 1, reports.size)
+        assertEquals(
+            "and the one report says which playbooks it holds for",
+            listOf("site-container-mon.yml", "site-fleet-extra.yml"),
+            reports.single().playbooks.map { it.name }.sorted(),
+        )
+    }
+
+    /**
+     * F17 — and rows identical in every inventory collapse to one line.
+     *
+     * A role bound to a one-host group yields two rows per environment: the
+     * targeted host, and everyone else undefined. Across four environments
+     * that was eight rows saying what two say.
+     */
+    fun testRowsIdenticalInEveryInventoryCollapse() {
+        val reference = variableReferenceAt(
+            "roles/container_monitoring_agent/tasks/main.yml", 16, "agent_image",
+        )
+        val rows = VariableReportBuilder.getInstance(project)
+            .buildAll("agent_image", reference.element).single().rows
+
+        assertEquals("one row for the targeted hosts, one for the rest", 2, rows.size)
+        assertTrue(
+            "both hold for every inventory: ${rows.map { it.inventory }}",
+            rows.all { it.inventory == "all inventories" },
+        )
+        assertEquals(
+            "the targeted row names the one containers host per environment",
+            listOf("a-host-01", "b-host-01", "c-host-07", "d-host-01"),
+            rows.single { it.kind == ValueKind.LITERAL }.hosts.sorted(),
+        )
+    }
+
+    /**
+     * F18 — a mapping value is a literal, not a run-time value.
+     *
+     * The index stores a scalar or nothing, so `artifact_repo:` with nested
+     * keys arrived as null. Reading that null as "no static value" labelled it
+     * *registered at run time* — telling the reader a plain literal only
+     * exists during the play, which is simply false.
+     */
+    fun testMappingValuedVariableIsNotReportedAsRuntime() {
+        val reference = variableReferenceAt(
+            "roles/container_monitoring_agent/tasks/main.yml", 16, "artifact_repo",
+        )
+        val rows = VariableReportBuilder.getInstance(project)
+            .buildAll("artifact_repo", reference.element).single().rows
+
+        val default = rows.single { it.inventory == "all inventories" }
+        assertEquals(
+            "a nested mapping is a literal value, not a registered one",
+            ValueKind.LITERAL,
+            default.kind,
+        )
+        assertTrue(
+            "and the value itself is shown: ${default.value}",
+            default.value.orEmpty().contains("repo.example.test/generic-release"),
         )
     }
 

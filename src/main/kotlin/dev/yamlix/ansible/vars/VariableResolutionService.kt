@@ -750,7 +750,7 @@ class VariableResolutionService(private val project: Project) {
      *    is the correct answer, not a guess.
      *  - **a populated set** — the ordinary case.
      */
-    private fun eligibleHosts(play: YAMLMapping?, graph: InventoryGraph): Set<String>? {
+    fun eligibleHosts(play: YAMLMapping?, graph: InventoryGraph): Set<String>? {
         val pattern = play?.getKeyValueByKey("hosts")?.valueText?.trim()
         if (pattern.isNullOrEmpty() || pattern.contains("{{")) return null
         if (pattern == InventoryGraph.ALL || pattern == "*") return null
