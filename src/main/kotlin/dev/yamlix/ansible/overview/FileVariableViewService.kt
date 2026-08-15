@@ -3,7 +3,10 @@ package dev.yamlix.ansible.overview
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
 import com.intellij.openapi.progress.ProgressManager
+import com.intellij.openapi.project.DumbService
+import com.intellij.openapi.project.IndexNotReadyException
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.roots.ProjectFileIndex
 import com.intellij.openapi.vfs.VfsUtilCore
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiManager
@@ -13,6 +16,7 @@ import dev.yamlix.ansible.inventory.InventoryGraph
 import dev.yamlix.ansible.inventory.InventoryGraphService
 import dev.yamlix.ansible.layout.AnsibleLayoutService
 import dev.yamlix.ansible.psi.PlayStructure
+import dev.yamlix.ansible.refs.AnsibleTargets
 import dev.yamlix.ansible.refs.AnsibleVariableReference
 import dev.yamlix.ansible.vars.AnsibleVarIndex
 import dev.yamlix.ansible.vars.ValueKind
@@ -50,18 +54,54 @@ class FileVariableViewService(private val project: Project) {
 
         /** A value longer than this is not worth showing beside its siblings. */
         private const val SIDE_BY_SIDE_CHARS = 20
+
+        /** Where opening a role should land, in order of usefulness. */
+        private val ROLE_ENTRY_CANDIDATES = listOf(
+            "tasks/main.yml", "tasks/main.yaml",
+            "defaults/main.yml", "defaults/main.yaml",
+            "vars/main.yml", "vars/main.yaml",
+            "meta/main.yml", "meta/main.yaml",
+        )
     }
 
-    fun build(file: VirtualFile): FileVariableView? {
+    /**
+     * What the tool window should show for [file].
+     *
+     * Indexing is a distinct answer, not a missing one. Every row here is built
+     * from the variable index, so running while the index is still filling does
+     * not produce a partial view — it produces a confident, wrong one, in which
+     * variables that are defined a directory away read as "not defined in this
+     * project". Saying "indexing" is the only honest thing available.
+     */
+    fun build(file: VirtualFile): ViewState =
+        if (DumbService.isDumb(project)) ViewState.Indexing
+        else try {
+            buildNow(file)
+        } catch (_: IndexNotReadyException) {
+            // Indexing can begin between the check above and the reads below.
+            ViewState.Indexing
+        }
+
+    private fun buildNow(file: VirtualFile): ViewState {
         val layout = AnsibleLayoutService.getInstance(project)
-        if (!layout.isAnsibleContext(file)) return null
-        val psi = PsiManager.getInstance(project).findFile(file) as? YAMLFile ?: return null
+        if (!layout.isAnsibleContext(file)) return ViewState.NotAnsible
+        val psi = PsiManager.getInstance(project).findFile(file) as? YAMLFile
+            ?: return ViewState.NotAnsible
+
+        // Outside the content roots nothing is indexed, so every lookup comes
+        // back empty and the whole file reads as undefined. That is a fact
+        // about the project's configuration, not about the Ansible — and the
+        // two are indistinguishable to a reader unless we say which it is.
+        if (!ProjectFileIndex.getInstance(project).isInContent(file)) {
+            return ViewState.OutsideContentRoots
+        }
 
         val reports = VariableReportBuilder.getInstance(project)
         val reachedBy = reports.playbooksFor(file)
 
-        return FileVariableView(
+        return ViewState.Ready(FileVariableView(
             title = file.name,
+            base = layout.cfgFor(file)?.baseDir,
             subtitle = subtitleFor(file),
             reachedBy = reachedBy,
             runsOn = runsOn(file, reachedBy),
@@ -71,7 +111,75 @@ class FileVariableViewService(private val project: Project) {
             defines = definedVariables(file).map { (name, usage) ->
                 row(name, usage.element, usage.ranges, defined = true)
             },
-        )
+            plays = playOutlines(file, psi),
+            imports = playImports(file, psi),
+        ))
+    }
+
+    // ---- what a playbook declares -------------------------------------------
+
+    /**
+     * The plays of a playbook, or nothing when the file is not one.
+     *
+     * Built from the PSI rather than from resolution, so a playbook whose
+     * `hosts:` cannot be evaluated still lists its plays and roles — the thing
+     * a reader opened it to see.
+     */
+    private fun playOutlines(file: VirtualFile, psi: YAMLFile): List<PlayOutline> {
+        if (!PlayStructure.isPlaybook(psi)) return emptyList()
+        val graphs = InventoryGraphService.getInstance(project)
+        val resolver = VariableResolutionService.getInstance(project)
+        val roots = AnsibleLayoutService.getInstance(project).inventoryRoots(file)
+
+        return PlayStructure.plays(psi).mapNotNull { play ->
+            val hostsKey = play.getKeyValueByKey("hosts") ?: return@mapNotNull null
+            val hosts = (hostsKey.value as? YAMLScalar)?.textValue ?: hostsKey.valueText
+
+            val targeted = LinkedHashSet<String>()
+            val groups = LinkedHashSet<String>()
+            var knowable = roots.isNotEmpty()
+            for (root in roots) {
+                val graph = graphs.graphFor(root)
+                val eligible = resolver.eligibleHosts(play, graph)
+                if (eligible == null) { knowable = false; continue }
+                eligible.forEach { targeted += "${root.name}/$it" }
+                groupNaming(graph, eligible)?.let { groups += it }
+            }
+
+            PlayOutline(
+                name = play.getKeyValueByKey("name")?.valueText,
+                hosts = hosts,
+                hostSummary = when {
+                    !knowable -> "pattern cannot be evaluated"
+                    else -> phrase(groups, targeted)
+                },
+                offset = hostsKey.textOffset,
+                roles = staticRoleNames(play).map { name ->
+                    PlayRole(name, roleEntryFile(name, file))
+                },
+            )
+        }
+    }
+
+    /** The `import_playbook` entries of a playbook, in file order. */
+    private fun playImports(file: VirtualFile, psi: YAMLFile): List<PlayImport> {
+        if (!PlayStructure.isPlaybook(psi)) return emptyList()
+        return PlayStructure.plays(psi).mapNotNull { play ->
+            val key = play.getKeyValueByKey("import_playbook") ?: return@mapNotNull null
+            val path = key.valueText.trim().ifEmpty { return@mapNotNull null }
+            // A templated path is not resolvable here, and inventing one target
+            // would be exactly the guess the rest of the plugin refuses to make.
+            val target = if (path.contains("{{")) null else AnsibleTargets.resolveFile(
+                path, AnsibleTargets.FileKind.TASKS, file, project,
+            ).firstOrNull()
+            PlayImport(path, target, key.textOffset)
+        }
+    }
+
+    /** The file to open for a role: its tasks, else its defaults, else vars. */
+    private fun roleEntryFile(name: String, from: VirtualFile): VirtualFile? {
+        val dir = AnsibleTargets.resolveRoleDirs(name, from, project).firstOrNull() ?: return null
+        return ROLE_ENTRY_CANDIDATES.firstNotNullOfOrNull { dir.findFileByRelativePath(it) }
     }
 
     // ---- header -------------------------------------------------------------
@@ -127,11 +235,18 @@ class FileVariableViewService(private val project: Project) {
                 }
             }
         }
-        if (hosts.isEmpty()) return "no host — this file never runs"
+        return phrase(groups, hosts) ?: "no host — this file never runs"
+    }
 
+    /**
+     * "containers — 4 hosts", or just the count when no single group describes
+     * them. Shared by the header and the play rows so the two cannot drift into
+     * describing the same set differently.
+     */
+    private fun phrase(groups: Set<String>, hosts: Set<String>): String? {
+        if (hosts.isEmpty()) return null
         val count = "${hosts.size} ${if (hosts.size == 1) "host" else "hosts"}"
-        val group = groups.singleOrNull()
-        return if (group != null) "$group — $count" else count
+        return groups.singleOrNull()?.let { "$it — $count" } ?: count
     }
 
     /** The group whose membership is exactly [hosts], when exactly one is. */
@@ -273,8 +388,18 @@ class FileVariableViewService(private val project: Project) {
         RowStatus.NEVER_WINS -> "never wins — something always overrides it"
         RowStatus.PROVIDED_BY_ANSIBLE -> magic?.description
         RowStatus.UNRESOLVED -> "not defined in this project"
+        // From an *ambiguous* row, not merely the first row that happens to
+        // carry a note. A variable can be ambiguous under one inventory and
+        // undefined under another, and taking whichever note came first put
+        // "not defined anywhere in this project" beside a list of four
+        // candidate values. Row order differs between a copied test fixture and
+        // a real VFS, which is why this read correctly under test and wrongly
+        // in the IDE.
         RowStatus.AMBIGUOUS ->
-            reports.flatMap { it.rows }.firstNotNullOfOrNull { it.note } ?: "depends on run-time state"
+            reports.flatMap { it.rows }
+                .filter { it.kind == ValueKind.AMBIGUOUS }
+                .firstNotNullOfOrNull { it.note }
+                ?: "several sites could win; the outcome depends on run-time state"
         RowStatus.VARIES -> "differs by host"
         RowStatus.RESOLVED -> null
     }
@@ -319,6 +444,7 @@ class FileVariableViewService(private val project: Project) {
                         offset = definition.offset,
                         where = wins.ifEmpty { mayWin },
                         scopeLabel = definition.scope.display,
+                        scopeRank = definition.scope.rank,
                     )
                 }
                 true

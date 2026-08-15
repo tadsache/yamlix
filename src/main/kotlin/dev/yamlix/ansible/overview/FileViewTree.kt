@@ -12,31 +12,110 @@ import javax.swing.Icon
  */
 object FileViewTree {
 
-    fun build(view: FileVariableView?): List<OverviewTreeNode> {
-        if (view == null) {
-            return listOf(OverviewTreeNode(HintNode("Open a file inside an Ansible project")))
+    private val SITE_ORDER = listOf(
+        SiteStatus.WINS, SiteStatus.MAY_WIN, SiteStatus.OVERRIDDEN, SiteStatus.NOT_IN_SCOPE,
+    )
+
+    fun build(state: ViewState): List<OverviewTreeNode> {
+        val view = when (state) {
+            ViewState.NotAnsible ->
+                return listOf(OverviewTreeNode(HintNode("Open a file inside an Ansible project")))
+            // Deliberately not a partial view. Every row depends on the index,
+            // so anything rendered now would read as fact and be wrong.
+            ViewState.Indexing ->
+                return listOf(OverviewTreeNode(HintNode("Indexing — variables cannot be resolved yet")))
+            ViewState.OutsideContentRoots ->
+                return listOf(
+                    OverviewTreeNode(HintNode("This file is outside the project's content roots")),
+                    OverviewTreeNode(
+                        HintNode("Nothing here is indexed, so no variable can be resolved. " +
+                            "Add its directory as a content root in Project Structure.")
+                    ),
+                )
+            is ViewState.Ready -> state.view
         }
 
         val rows = ArrayList<OverviewTreeNode>()
         rows += OverviewTreeNode(HeaderNode(view))
 
-        rows += OverviewTreeNode(
-            SectionNode("Uses", view.uses.size),
-            view.uses.map { OverviewTreeNode(VariableRowNode(it)) }.ifEmpty {
-                listOf(OverviewTreeNode(HintNode("No {{ variables }} in this file")))
-            },
-        )
+        // A playbook's declarations come first: they are what the file is, and
+        // for a site playbook that references no variables they are the only
+        // thing worth showing.
+        //
+        // Plays and imports are interleaved in file order rather than grouped
+        // by kind, because a playbook is read top to bottom and the order is
+        // the order things run in.
+        val entries = view.plays.map { it.offset to playRow(it) } +
+            view.imports.map { it.offset to OverviewTreeNode(PlayImportNode(it)) }
+        if (entries.isNotEmpty()) {
+            rows += OverviewTreeNode(
+                SectionNode("Runs", entries.size),
+                entries.sortedBy { it.first }.map { it.second },
+            )
+        }
+
+        // The "no variables here" hint exists so an empty box cannot be
+        // mistaken for a failure to load. A playbook that has already shown its
+        // plays is visibly not empty, so the hint would just be a row saying
+        // nothing.
+        if (view.uses.isNotEmpty() || entries.isEmpty()) {
+            rows += OverviewTreeNode(
+                SectionNode("Uses", view.uses.size),
+                view.uses.map { variableRow(it, view.base) }.ifEmpty {
+                    listOf(OverviewTreeNode(HintNode("No {{ variables }} in this file")))
+                },
+            )
+        }
 
         // Only offered when the file actually declares something. A task file
         // has nothing to declare, and an empty section would imply it should.
         if (view.defines.isNotEmpty()) {
             rows += OverviewTreeNode(
                 SectionNode("Defines", view.defines.size),
-                view.defines.map { OverviewTreeNode(VariableRowNode(it)) },
+                view.defines.map { variableRow(it, view.base) },
             )
         }
         return rows
     }
+
+    /**
+     * A variable and its definition sites, inline.
+     *
+     * The sites used to live in a second pane below, which meant half the tool
+     * window was reserved for a list that usually has one entry. As children
+     * they cost one line when you want them and nothing when you do not.
+     */
+    private fun variableRow(row: VariableRow, base: VirtualFile?): OverviewTreeNode {
+        // The same rule the "Choose Declaration" popup uses: a same-named
+        // variable in an unrelated role is not a candidate here, and listing it
+        // only invites the reader to wonder why it lost. Flow-sensitive scopes
+        // stay, because there the reason is position, not relevance.
+        val sites = row.sites.filter { it.status != SiteStatus.NOT_IN_SCOPE || it.flowSensitive }
+
+        // The value is already on the variable row when there is only one, so
+        // repeating it on the site says nothing. With several it is the whole
+        // point of listing them separately.
+        val showValue = sites.mapNotNull { it.value }.distinct().size > 1
+
+        // Winner first, then what might still win, then what lost — and within
+        // each, the higher precedence first. Index order put the overridden
+        // definition above the one that beat it.
+        val ordered = sites.sortedWith(
+            compareBy({ SITE_ORDER.indexOf(it.status) }, { -it.scopeRank }),
+        )
+
+        return OverviewTreeNode(
+            VariableRowNode(row),
+            ordered.map { OverviewTreeNode(SiteNode(it, base, showValue)) },
+        )
+    }
+
+    private fun playRow(play: PlayOutline) = OverviewTreeNode(
+        PlayNode(play),
+        play.roles.map { OverviewTreeNode(PlayRoleNode(it)) }.ifEmpty {
+            listOf(OverviewTreeNode(HintNode("no roles — tasks only")))
+        },
+    )
 }
 
 /** The file, what reaches it, and which hosts that means. */
@@ -47,6 +126,9 @@ data class HeaderNode(val view: FileVariableView) : OverviewNode {
     override val detail: String
         get() {
             val reached = when {
+                // A playbook reaches itself. Saying so is noise, and reads as
+                // though something else pulled it in.
+                view.plays.isNotEmpty() -> "playbook"
                 view.reachedBy.isEmpty() -> "reached by no playbook"
                 else -> "reached by ${view.reachedBy.joinToString(", ") { it.name }}"
             }
@@ -76,28 +158,61 @@ data class VariableRowNode(val row: VariableRow) : OverviewNode {
         }
 }
 
-/** One definition site, in the detail pane. */
-data class SiteNode(val site: VariableSite, private val base: VirtualFile?) : OverviewNode {
-    override val text: String
-        get() = when (site.status) {
-            SiteStatus.WINS -> "WINS"
-            SiteStatus.MAY_WIN -> "MAY WIN"
-            SiteStatus.OVERRIDDEN -> "overridden"
-            SiteStatus.NOT_IN_SCOPE -> "not in scope here"
-        }
+/**
+ * One definition site, under the variable it defines.
+ *
+ * Led by the precedence level — `role defaults`, `group_vars` — rather than a
+ * verdict. "WINS" was shouted loudest in the one case where it said nothing:
+ * a single site has nothing to win against. The level is the *reason* it wins,
+ * which is the part no other tool will tell you, and the outcome is carried by
+ * the icon and the dimming instead of a word.
+ */
+private const val MAX_SITE_VALUE = 40
+
+data class SiteNode(
+    val site: VariableSite,
+    private val base: VirtualFile? = null,
+    /** Shown only when it adds to what the variable row already says. */
+    private val showValue: Boolean = false,
+) : OverviewNode {
+
+    override val text: String get() = site.scopeLabel
 
     override val detail: String
-        get() {
-            val where = if (site.where.isEmpty()) "" else "  ·  ${site.where.joinToString("; ")}"
-            return "${site.value ?: site.scopeLabel}$where"
+        get() = buildList {
+            if (showValue) site.value?.let { add(flatten(it)) }
+            addAll(site.where)
+            if (site.status == SiteStatus.OVERRIDDEN) add("overridden")
+            if (site.status == SiteStatus.MAY_WIN) add("may win at run time")
+            add(pathLabel())
+        }.joinToString("  ·  ")
+
+    /** The winner is ticked; everything else is a bullet and rendered dim. */
+    override val icon: Icon
+        get() = when (site.status) {
+            SiteStatus.WINS -> AllIcons.Actions.Checked
+            SiteStatus.MAY_WIN -> AllIcons.General.Warning
+            else -> AllIcons.Nodes.EmptyNode
         }
 
-    override val icon: Icon
-        get() = if (site.status == SiteStatus.WINS) AllIcons.Actions.Commit else AllIcons.Nodes.Padlock
+    /** Whether the renderer should grey this row out. */
+    val subdued: Boolean get() = site.status == SiteStatus.OVERRIDDEN ||
+        site.status == SiteStatus.NOT_IN_SCOPE
 
     override fun target() = site.file to site.offset
 
-    /** The path, shown on its own line so a long value never squeezes it out. */
+    /**
+     * One line, bounded.
+     *
+     * A mapping value arrives with its newlines, and pasted whole it pushed the
+     * inventories and the path off the end of the row.
+     */
+    private fun flatten(value: String): String {
+        val oneLine = value.replace(Regex("\\s+"), " ").trim()
+        return if (oneLine.length <= MAX_SITE_VALUE) oneLine
+        else oneLine.take(MAX_SITE_VALUE).trimEnd() + "…"
+    }
+
     fun pathLabel(): String =
         base?.let { com.intellij.openapi.vfs.VfsUtilCore.getRelativePath(site.file, it) }
             ?: site.file.name

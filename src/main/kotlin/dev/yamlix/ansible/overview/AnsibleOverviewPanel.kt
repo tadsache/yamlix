@@ -19,11 +19,11 @@ import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.fileEditor.FileEditorManagerEvent
 import com.intellij.openapi.fileEditor.FileEditorManagerListener
+import com.intellij.openapi.project.DumbService
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.SimpleToolWindowPanel
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.ui.ColoredTreeCellRenderer
-import com.intellij.ui.OnePixelSplitter
 import com.intellij.ui.DoubleClickListener
 import com.intellij.ui.ScrollPaneFactory
 import com.intellij.ui.SimpleTextAttributes
@@ -46,8 +46,10 @@ import javax.swing.tree.TreeSelectionModel
  * anywhere else — and because it is a panel it can show the whole resolution
  * table for the selected variable with nothing truncated.
  *
- * Top: the variables of the current file. Bottom: every definition site of the
- * selected one. The caret drives the selection unless [pinned].
+ * One tree: the variables of the current file, each expanding to the sites
+ * that define it. The caret drives the selection unless [pinned]. Sites stay
+ * collapsed until you ask, so the common case — one variable, one definition —
+ * costs one line rather than half the window.
  */
 class AnsibleOverviewPanel(private val project: Project) :
     SimpleToolWindowPanel(true, true), Disposable {
@@ -56,24 +58,13 @@ class AnsibleOverviewPanel(private val project: Project) :
     private val listModel = DefaultTreeModel(listRoot)
     private val list = Tree(listModel)
 
-    private val detailRoot = DefaultMutableTreeNode()
-    private val detailModel = DefaultTreeModel(detailRoot)
-    private val detail = Tree(detailModel)
-
     private var file: VirtualFile? = null
     private var view: FileVariableView? = null
     private var pinned = false
 
     init {
         configure(list)
-        configure(detail)
-
-        list.addTreeSelectionListener { showDetailFor(selected(list) as? VariableRowNode) }
-
-        val splitter = OnePixelSplitter(true, 0.55f)
-        splitter.firstComponent = ScrollPaneFactory.createScrollPane(list, true)
-        splitter.secondComponent = ScrollPaneFactory.createScrollPane(detail, true)
-        setContent(splitter)
+        setContent(ScrollPaneFactory.createScrollPane(list, true))
         toolbar = buildToolbar()
 
         val connection = project.messageBus.connect(this)
@@ -83,6 +74,17 @@ class AnsibleOverviewPanel(private val project: Project) :
                 override fun selectionChanged(event: FileEditorManagerEvent) {
                     if (!pinned) retargetTo(event.newFile)
                 }
+            },
+        )
+
+        // A file opened during start-up is the common case, not the rare one,
+        // and while the index fills every variable in it resolves to nothing.
+        // Without this the first thing a new user ever sees is a file they know
+        // is fine, reported as entirely undefined.
+        connection.subscribe(
+            DumbService.DUMB_MODE,
+            object : DumbService.DumbModeListener {
+                override fun exitDumbMode() = refresh()
             },
         )
 
@@ -159,17 +161,17 @@ class AnsibleOverviewPanel(private val project: Project) :
         val target = file ?: return
         render(null, HintNode("Resolving ${target.name}…"))
 
-        ReadAction.nonBlocking<FileVariableView?> {
+        ReadAction.nonBlocking<ViewState> {
             FileVariableViewService.getInstance(project).build(target)
         }
             .expireWith(this)
             .coalesceBy(this)
             .finishOnUiThread(ModalityState.defaultModalityState()) { built ->
-                view = built
+                view = (built as? ViewState.Ready)?.view
                 listRoot.removeAllChildren()
                 FileViewTree.build(built).forEach { listRoot.add(it.toSwing()) }
                 listModel.reload()
-                expandAll(list)
+                expandSections(list)
                 currentCaretOffset()?.let(::selectRowAt)
             }
             .submit(AppExecutorUtil.getAppExecutorService())
@@ -180,37 +182,15 @@ class AnsibleOverviewPanel(private val project: Project) :
         listRoot.removeAllChildren()
         listRoot.add(DefaultMutableTreeNode(hint))
         listModel.reload()
-        detailRoot.removeAllChildren()
-        detailModel.reload()
-    }
-
-    private fun showDetailFor(row: VariableRowNode?) {
-        detailRoot.removeAllChildren()
-        if (row == null) {
-            detailModel.reload()
-            return
-        }
-        val base = AnsibleLayoutService.getInstance(project).cfgFor(file ?: return)?.baseDir
-        for (site in row.row.sites) {
-            val node = SiteNode(site, base)
-            val swing = DefaultMutableTreeNode(node)
-            // The path gets its own child row rather than sharing the line: a
-            // long value would otherwise push it out of sight, and the path is
-            // the part you click.
-            swing.add(DefaultMutableTreeNode(HintNode(node.pathLabel())))
-            detailRoot.add(swing)
-        }
-        detailModel.reload()
-        expandAll(detail)
     }
 
     /**
      * Selects the variable the caret is inside, if any.
      *
-     * Nothing is deselected when the caret is elsewhere — losing the detail
-     * pane every time you move through ordinary YAML would make it flicker.
-     * The decision itself lives in [FileVariableView.rowAt], where it can be
-     * tested.
+     * Nothing is deselected when the caret is elsewhere — collapsing the
+     * variable every time you move through ordinary YAML would make it
+     * flicker. The decision itself lives in [FileVariableView.rowAt], where it
+     * can be tested.
      */
     private fun selectRowAt(offset: Int) {
         val row = view?.rowAt(offset) ?: return
@@ -226,6 +206,9 @@ class AnsibleOverviewPanel(private val project: Project) :
                 if (node.row.name != name) continue
                 val path = TreePath(arrayOf(listRoot, sectionNode, child))
                 list.selectionPath = path
+                // Expand it: the sites are why you looked, and the caret
+                // landing on a variable is the moment you want them.
+                list.expandPath(path)
                 list.scrollPathToVisible(path)
                 return
             }
@@ -244,11 +227,17 @@ class AnsibleOverviewPanel(private val project: Project) :
         return swing
     }
 
-    private fun expandAll(tree: Tree) {
-        var row = 0
-        while (row < tree.rowCount) {
-            tree.expandRow(row)
-            row++
+    /**
+     * Expands the sections, and nothing below them.
+     *
+     * Expanding everything would put every definition site of every variable on
+     * screen at once — for a task file that is a wall. The sites of the one
+     * variable you are standing in are expanded by [selectRowNamed] instead,
+     * which is the only set you asked about.
+     */
+    private fun expandSections(tree: Tree) {
+        for (section in 0 until listRoot.childCount) {
+            tree.expandPath(TreePath(arrayOf(listRoot, listRoot.getChildAt(section))))
         }
     }
 
@@ -269,7 +258,16 @@ class AnsibleOverviewPanel(private val project: Project) :
         ) {
             val node = (value as? DefaultMutableTreeNode)?.userObject as? OverviewNode ?: return
             icon = node.icon
-            append(node.text)
+
+            // A site that lost is greyed whole. The outcome used to be a word
+            // ("overridden"); carrying it in the weight instead means the eye
+            // finds the winner without reading anything.
+            val subdued = (node as? SiteNode)?.subdued == true
+            append(
+                node.text,
+                if (subdued) SimpleTextAttributes.GRAYED_ATTRIBUTES
+                else SimpleTextAttributes.REGULAR_ATTRIBUTES,
+            )
             node.detail?.let { append("  $it", SimpleTextAttributes.GRAYED_ATTRIBUTES) }
         }
     }

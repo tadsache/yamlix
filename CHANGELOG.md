@@ -8,17 +8,47 @@ All notable changes to yamlix are recorded here. Versions follow
 ### Added
 
 - **Ansible tool window.** Every variable the current file uses and defines,
-  with its effective value and what is wrong with it; select one to see every
-  definition site, with the inventories and groups it holds on. A header
-  saying which playbooks reach the file and which hosts that means. Follows
-  the caret; pin freezes it.
+  with its effective value and what is wrong with it; expand one to see every
+  definition site, led by its Ansible precedence level, with the inventories
+  and groups it holds on. A header saying which playbooks reach the file and
+  which hosts that means. Follows the caret; pin freezes it.
 - Variable statuses that distinguish *resolved*, *varies by host*,
   *ambiguous*, *supplied by Ansible*, *undefined*, and *never wins* — the last
   being configuration that is written, indexed and always overridden.
 - `{{ item }}` and `ansible_loop_var` recognised as variables Ansible supplies.
+- A playbook's own declarations in the tool window: each play with the hosts it
+  targets and how many that is, the roles it runs, and its `import_playbook`
+  entries, interleaved in file order. A site playbook references no variables
+  of its own, so the window previously had nothing to say about the very file
+  that decides where everything runs.
+
+### Fixed (tool window)
+
+- A file outside the project's content roots is reported as unindexed rather
+  than undefined. Nothing there is indexed, so every lookup came back empty and
+  a completely correct project read as one where no variable is defined
+  anywhere — indistinguishable, on screen, from a real finding.
+- The note on an ambiguous variable now describes the ambiguity. It was taken
+  from whichever of the variable's rows carried a note first, so a variable
+  ambiguous under one inventory and undefined under another read "not defined
+  anywhere in this project" beside a list of its four candidate values.
+- The tool window no longer answers while the index is still building. Every
+  row comes from the variable index, so running during start-up indexing did
+  not produce a partial view but a confident, wrong one — a role's own
+  `defaults/main.yml` reported as "not defined in this project" — and threw
+  `IndexNotReadyException` behind it. It now says it is indexing and rebuilds
+  when indexing ends.
 
 ### Changed
 
+- Definition sites are shown inline under their variable instead of in a second
+  pane, and lead with the precedence level — `role defaults`, `group_vars` —
+  rather than a verdict. `WINS` was shouted loudest in the case where it said
+  least: a single definition has nothing to have won against. The outcome is
+  carried by the icon and by greying what lost, and the level says *why* it
+  wins. Sites are ordered winner-first and then by descending precedence, so
+  the list reads as the ladder it is; index order had put an overridden
+  definition above the one that beat it.
 - Playbooks are found anywhere under the `ansible.cfg` directory, not only in
   it and in `playbooks/`. A `playbooks/<area>/site-*.yml` layout was previously
   invisible, so role reach and variable resolution silently under-reported.

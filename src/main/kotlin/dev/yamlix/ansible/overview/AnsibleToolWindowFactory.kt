@@ -9,10 +9,11 @@ import com.intellij.ui.content.ContentFactory
 /**
  * Registers the Ansible tool window.
  *
- * [DumbAware] because the structural overview needs only PSI and the VFS, so
- * it has a real answer while the IDE is still indexing. The one part that does
- * need the index — the dead-configuration analysis — asks for smart mode
- * itself, and its toolbar button disables until then.
+ * [DumbAware] so the window can be opened while the IDE indexes — but every
+ * row in it comes from the variable index, so it has no answer until indexing
+ * finishes. The panel says so and rebuilds itself on the way out of dumb mode;
+ * it must never render variable rows from an index that is still filling,
+ * because those rows are wrong rather than incomplete.
  */
 class AnsibleToolWindowFactory : ToolWindowFactory, DumbAware {
 
