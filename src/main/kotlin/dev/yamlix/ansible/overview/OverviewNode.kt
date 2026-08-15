@@ -19,6 +19,15 @@ sealed interface OverviewNode {
     val detail: String? get() = null
     val icon: Icon? get() = null
 
+    /**
+     * What the hover says, when the row abbreviates something.
+     *
+     * Null means the row already says it all and the renderer falls back to
+     * the row's own text. Nothing in this window may be reachable *only* by
+     * widening the tool window.
+     */
+    val tooltip: String? get() = null
+
     /** Where double-clicking lands, or null when the row is not a place. */
     fun target(): Pair<VirtualFile, Int>? = null
 
@@ -41,9 +50,15 @@ data class OverviewTreeNode(
  * means "uses" — a folder glyph only invites the reader to look for a folder.
  * Indentation and the count already say everything a section row has to say.
  */
-data class SectionNode(private val title: String, private val count: Int) : OverviewNode {
+data class SectionNode(
+    private val title: String,
+    private val count: Int,
+    /** A caveat about the whole section, when one applies to every row in it. */
+    private val note: String? = null,
+) : OverviewNode {
     override val text: String get() = title
-    override val detail: String get() = "($count)"
+    override val detail: String
+        get() = note?.let { "($count)  ·  $it" } ?: "($count)"
 }
 
 /**

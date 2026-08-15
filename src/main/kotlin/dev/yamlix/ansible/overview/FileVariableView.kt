@@ -77,6 +77,15 @@ data class FileVariableView(
      * a reader stop trusting the panel.
      */
     val imports: List<PlayImport> = emptyList(),
+    /**
+     * The groups this file declares, when it is an inventory. Empty otherwise.
+     *
+     * An inventory is where "where does this run" is decided, and until now the
+     * tool window said "open a file inside an Ansible project" when you were
+     * standing in one. A group's interesting question is not what it contains —
+     * that is on screen already — but who targets it.
+     */
+    val groups: List<GroupOutline> = emptyList(),
 ) {
     /**
      * The variable the caret sits inside, or null when it sits in ordinary
@@ -90,6 +99,10 @@ data class FileVariableView(
      * value, so `foo: "{{ bar }}"` contains both, and the caret inside `bar` is
      * about `bar`.
      */
+    /** The group whose header the caret sits in, if any. */
+    fun groupAt(offset: Int): GroupOutline? =
+        groups.firstOrNull { group -> group.ranges.any { offset in it } }
+
     fun rowAt(offset: Int): VariableRow? =
         (uses + defines)
             .mapNotNull { row ->
@@ -99,6 +112,35 @@ data class FileVariableView(
             .minByOrNull { it.second }
             ?.first
 }
+
+/**
+ * A group declared by an inventory, and who aims at it.
+ *
+ * [targetedBy] is the answer to "if I change this group, what moves?" — the
+ * plays whose `hosts:` selects any of its hosts. [unevaluatedPlays] counts the
+ * plays whose pattern could not be evaluated, because silently omitting them
+ * would present a partial list as a complete one.
+ */
+data class GroupOutline(
+    val name: String,
+    val hostCount: Int,
+    val children: List<String>,
+    val offset: Int,
+    val ranges: List<IntRange>,
+    val targetedBy: List<GroupUse>,
+    val varsFiles: List<VirtualFile>,
+    val unevaluatedPlays: Int,
+)
+
+/** A play that runs on this group, and how squarely. */
+data class GroupUse(
+    val playbook: VirtualFile,
+    val offset: Int,
+    val pattern: String,
+    /** True when the play targets exactly this group's hosts and no others. */
+    val exact: Boolean,
+    val matchedHosts: Int,
+)
 
 /**
  * One play of a playbook: what it targets and what it runs there.

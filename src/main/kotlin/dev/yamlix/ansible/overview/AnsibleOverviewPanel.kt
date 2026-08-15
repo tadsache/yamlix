@@ -32,6 +32,7 @@ import com.intellij.util.concurrency.AppExecutorUtil
 import dev.yamlix.ansible.layout.AnsibleLayoutService
 import java.awt.event.MouseEvent
 import javax.swing.JTree
+import javax.swing.ScrollPaneConstants
 import javax.swing.tree.DefaultMutableTreeNode
 import javax.swing.tree.DefaultTreeModel
 import javax.swing.tree.TreePath
@@ -64,7 +65,11 @@ class AnsibleOverviewPanel(private val project: Project) :
 
     init {
         configure(list)
-        setContent(ScrollPaneFactory.createScrollPane(list, true))
+        val scroller = ScrollPaneFactory.createScrollPane(list, true)
+        // Rows are fitted to the width instead of running past it, so a
+        // horizontal bar would only ever scroll to whitespace.
+        scroller.horizontalScrollBarPolicy = ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER
+        setContent(scroller)
         toolbar = buildToolbar()
 
         val connection = project.messageBus.connect(this)
@@ -193,8 +198,11 @@ class AnsibleOverviewPanel(private val project: Project) :
      * can be tested.
      */
     private fun selectRowAt(offset: Int) {
-        val row = view?.rowAt(offset) ?: return
-        selectRowNamed(row.name)
+        val current = view ?: return
+        val name = current.rowAt(offset)?.name
+            ?: current.groupAt(offset)?.name
+            ?: return
+        selectRowNamed(name)
     }
 
     private fun selectRowNamed(name: String) {
@@ -202,8 +210,13 @@ class AnsibleOverviewPanel(private val project: Project) :
             val sectionNode = listRoot.getChildAt(section) as DefaultMutableTreeNode
             for (index in 0 until sectionNode.childCount) {
                 val child = sectionNode.getChildAt(index) as DefaultMutableTreeNode
-                val node = child.userObject as? VariableRowNode ?: continue
-                if (node.row.name != name) continue
+                val node = child.userObject as? OverviewNode ?: continue
+                val rowName = when (node) {
+                    is VariableRowNode -> node.row.name
+                    is GroupNode -> node.group.name
+                    else -> null
+                }
+                if (rowName != name) continue
                 val path = TreePath(arrayOf(listRoot, sectionNode, child))
                 list.selectionPath = path
                 // Expand it: the sites are why you looked, and the caret
@@ -247,6 +260,7 @@ class AnsibleOverviewPanel(private val project: Project) :
     override fun dispose() = Unit
 
     private class NodeRenderer : ColoredTreeCellRenderer() {
+
         override fun customizeCellRenderer(
             tree: JTree,
             value: Any?,
@@ -263,12 +277,40 @@ class AnsibleOverviewPanel(private val project: Project) :
             // ("overridden"); carrying it in the weight instead means the eye
             // finds the winner without reading anything.
             val subdued = (node as? SiteNode)?.subdued == true
-            append(
-                node.text,
+            val nameAttributes =
                 if (subdued) SimpleTextAttributes.GRAYED_ATTRIBUTES
-                else SimpleTextAttributes.REGULAR_ATTRIBUTES,
+                else SimpleTextAttributes.REGULAR_ATTRIBUTES
+
+            val detail = node.detail
+            // The whole row, always, on hover — nothing is only available by
+            // widening the tool window.
+            toolTipText = node.tooltip ?: detail?.let { "${node.text}    $it" } ?: node.text
+
+            val metrics = getFontMetrics(font)
+            val measure: (String) -> Int = { metrics.stringWidth(it) }
+            val available = RowText.availableWidth(
+                visibleWidth = tree.visibleRect.width,
+                depth = (value as? DefaultMutableTreeNode)?.level ?: 1,
+                iconWidth = node.icon?.let { it.iconWidth + iconTextGap } ?: 0,
             )
-            node.detail?.let { append("  $it", SimpleTextAttributes.GRAYED_ATTRIBUTES) }
+
+            if (available <= 0) {
+                // No layout yet; render in full rather than render nothing.
+                append(node.text, nameAttributes)
+                detail?.let { append("  $it", SimpleTextAttributes.GRAYED_ATTRIBUTES) }
+                return
+            }
+
+            // The name has first claim on the width — a row shortened to
+            // "artifact_re…" identifies nothing.
+            val name = RowText.fit(node.text, available, measure)
+            append(name, nameAttributes)
+            if (detail == null || name != node.text) return
+
+            val gap = "  "
+            val left = available - measure(name) - measure(gap)
+            val fitted = RowText.fit(detail, left, measure)
+            if (fitted.isNotEmpty()) append(gap + fitted, SimpleTextAttributes.GRAYED_ATTRIBUTES)
         }
     }
 }

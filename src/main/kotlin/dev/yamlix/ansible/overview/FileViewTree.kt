@@ -54,11 +54,30 @@ object FileViewTree {
             )
         }
 
+        // An inventory's groups, and who aims at them.
+        if (view.groups.isNotEmpty()) {
+            // The same plays are unevaluable for every group, so the caveat
+            // belongs to the section rather than repeated under each one.
+            val unevaluated = view.groups.maxOf { it.unevaluatedPlays }
+            rows += OverviewTreeNode(
+                SectionNode(
+                    "Groups",
+                    view.groups.size,
+                    note = if (unevaluated == 0) null else
+                        "$unevaluated ${if (unevaluated == 1) "play uses a pattern" else "plays use patterns"}" +
+                            " that cannot be evaluated",
+                ),
+                view.groups.map { group ->
+                    OverviewTreeNode(GroupNode(group), groupChildren(group, view.base))
+                },
+            )
+        }
+
         // The "no variables here" hint exists so an empty box cannot be
         // mistaken for a failure to load. A playbook that has already shown its
         // plays is visibly not empty, so the hint would just be a row saying
         // nothing.
-        if (view.uses.isNotEmpty() || entries.isEmpty()) {
+        if (view.uses.isNotEmpty() || (entries.isEmpty() && view.groups.isEmpty())) {
             rows += OverviewTreeNode(
                 SectionNode("Uses", view.uses.size),
                 view.uses.map { variableRow(it, view.base) }.ifEmpty {
@@ -110,6 +129,17 @@ object FileViewTree {
         )
     }
 
+    private fun groupChildren(group: GroupOutline, base: VirtualFile?): List<OverviewTreeNode> {
+        val rows = ArrayList<OverviewTreeNode>()
+        group.targetedBy.forEach { rows += OverviewTreeNode(GroupUseNode(it)) }
+        group.varsFiles.forEach { rows += OverviewTreeNode(GroupVarsNode(it, base)) }
+
+        if (rows.isEmpty()) {
+            rows += OverviewTreeNode(HintNode("no play targets this group"))
+        }
+        return rows
+    }
+
     private fun playRow(play: PlayOutline) = OverviewTreeNode(
         PlayNode(play),
         play.roles.map { OverviewTreeNode(PlayRoleNode(it)) }.ifEmpty {
@@ -129,13 +159,28 @@ data class HeaderNode(val view: FileVariableView) : OverviewNode {
                 // A playbook reaches itself. Saying so is noise, and reads as
                 // though something else pulled it in.
                 view.plays.isNotEmpty() -> "playbook"
+                view.groups.isNotEmpty() -> "inventory"
                 view.reachedBy.isEmpty() -> "reached by no playbook"
-                else -> "reached by ${view.reachedBy.joinToString(", ") { it.name }}"
+                view.reachedBy.size == 1 -> "reached by ${view.reachedBy.single().name}"
+                // Naming them all is what a docked tool window has least room
+                // for, and the count is what the reader is actually asking.
+                // The names are on the hover.
+                else -> "reached by ${view.reachedBy.size} playbooks"
             }
             return view.runsOn?.let { "$reached  ·  runs on $it" } ?: reached
         }
 
     override val icon: Icon get() = AllIcons.FileTypes.Yaml
+
+    /** The playbooks by name, which the row abbreviates to a count. */
+    override val tooltip: String
+        get() = buildList {
+            add(view.subtitle?.let { "$it · ${view.title}" } ?: view.title)
+            if (view.reachedBy.isNotEmpty()) {
+                add("reached by " + view.reachedBy.joinToString(", ") { it.name })
+            }
+            view.runsOn?.let { add("runs on $it") }
+        }.joinToString("\n")
 }
 
 data class VariableRowNode(val row: VariableRow) : OverviewNode {
@@ -156,6 +201,57 @@ data class VariableRowNode(val row: VariableRow) : OverviewNode {
             RowStatus.UNRESOLVED -> AllIcons.General.Error
             RowStatus.NEVER_WINS -> AllIcons.General.Warning
         }
+}
+
+/** A group an inventory declares. */
+data class GroupNode(val group: GroupOutline) : OverviewNode {
+    override val text: String get() = group.name
+
+    override val detail: String
+        get() = buildList {
+            add("${group.hostCount} ${if (group.hostCount == 1) "host" else "hosts"}")
+            if (group.children.isNotEmpty()) add("children: ${group.children.joinToString(", ")}")
+            add(
+                when (group.targetedBy.size) {
+                    0 -> "targeted by nothing"
+                    1 -> "targeted by 1 play"
+                    else -> "targeted by ${group.targetedBy.size} plays"
+                }
+            )
+        }.joinToString("  ·  ")
+
+    /** Nothing aiming at a group is worth noticing: it may be dead. */
+    override val icon: Icon
+        get() = if (group.targetedBy.isEmpty()) AllIcons.General.Warning else AllIcons.Nodes.Module
+}
+
+/** A play that runs on the group. */
+data class GroupUseNode(val use: GroupUse) : OverviewNode {
+    override val text: String get() = use.playbook.name
+
+    override val detail: String
+        get() = buildList {
+            add("hosts: ${use.pattern}")
+            if (!use.exact) add("${use.matchedHosts} of its hosts")
+        }.joinToString("  ·  ")
+
+    override val icon: Icon
+        get() = if (use.exact) AllIcons.Actions.Checked else AllIcons.Nodes.EmptyNode
+
+    override fun target() = use.playbook to use.offset
+}
+
+/** A `group_vars` file that applies to the group. */
+data class GroupVarsNode(val file: VirtualFile, private val base: VirtualFile?) : OverviewNode {
+    override val text: String get() = "group_vars"
+
+    override val detail: String
+        get() = base?.let { com.intellij.openapi.vfs.VfsUtilCore.getRelativePath(file, it) }
+            ?: file.name
+
+    override val icon: Icon get() = AllIcons.FileTypes.Yaml
+
+    override fun target() = file to 0
 }
 
 /**

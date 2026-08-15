@@ -75,6 +75,11 @@
             language="yaml"
             implementationClass="dev.yamlix.ansible.refs.AnsibleCompletionContributor"/>
 
+        <!-- Inverted on purpose: from an inventory group to the plays that run
+             on it. See the handler for why. -->
+        <gotoDeclarationHandler
+            implementation="dev.yamlix.ansible.refs.AnsibleGroupGotoDeclarationHandler"/>
+
         <platform.backend.documentation.targetProvider
             implementation="dev.yamlix.ansible.doc.AnsibleVarDocumentationTargetProvider"/>
 

@@ -13,6 +13,7 @@ import com.intellij.psi.PsiManager
 import com.intellij.psi.util.PsiTreeUtil
 import com.intellij.util.indexing.FileBasedIndex
 import dev.yamlix.ansible.inventory.InventoryGraph
+import dev.yamlix.ansible.inventory.GroupUsageService
 import dev.yamlix.ansible.inventory.InventoryGraphService
 import dev.yamlix.ansible.layout.AnsibleLayoutService
 import dev.yamlix.ansible.psi.PlayStructure
@@ -21,6 +22,7 @@ import dev.yamlix.ansible.refs.AnsibleVariableReference
 import dev.yamlix.ansible.vars.AnsibleVarIndex
 import dev.yamlix.ansible.vars.ValueKind
 import dev.yamlix.ansible.vars.VarDefinitionData
+import dev.yamlix.ansible.vars.VarFileRole
 import dev.yamlix.ansible.vars.VariableReport
 import dev.yamlix.ansible.vars.VariableReportBuilder
 import dev.yamlix.ansible.vars.VariableResolutionService
@@ -55,6 +57,9 @@ class FileVariableViewService(private val project: Project) {
         /** A value longer than this is not worth showing beside its siblings. */
         private const val SIDE_BY_SIDE_CHARS = 20
 
+        /** Patterns that mean "every host in the inventory". */
+        private val UNRESTRICTED = setOf("all", "*")
+
         /** Where opening a role should land, in order of usefulness. */
         private val ROLE_ENTRY_CANDIDATES = listOf(
             "tasks/main.yml", "tasks/main.yaml",
@@ -85,9 +90,6 @@ class FileVariableViewService(private val project: Project) {
     private fun buildNow(file: VirtualFile): ViewState {
         val layout = AnsibleLayoutService.getInstance(project)
         if (!layout.isAnsibleContext(file)) return ViewState.NotAnsible
-        val psi = PsiManager.getInstance(project).findFile(file) as? YAMLFile
-            ?: return ViewState.NotAnsible
-
         // Outside the content roots nothing is indexed, so every lookup comes
         // back empty and the whole file reads as undefined. That is a fact
         // about the project's configuration, not about the Ansible — and the
@@ -96,24 +98,86 @@ class FileVariableViewService(private val project: Project) {
             return ViewState.OutsideContentRoots
         }
 
+        val inventoryRoot = GroupUsageService.getInstance(project).inventoryRootOf(file)
+        // An INI inventory is not YAML, so the YAML gate cannot come first —
+        // that is why standing in `inventories/env-a/hosts` used to be told to
+        // open a file inside an Ansible project.
+        val psi = PsiManager.getInstance(project).findFile(file) as? YAMLFile
+        if (psi == null && inventoryRoot == null) return ViewState.NotAnsible
+
         val reports = VariableReportBuilder.getInstance(project)
-        val reachedBy = reports.playbooksFor(file)
+        val reachedBy = if (inventoryRoot != null) emptyList() else reports.playbooksFor(file)
 
         return ViewState.Ready(FileVariableView(
             title = file.name,
             base = layout.cfgFor(file)?.baseDir,
             subtitle = subtitleFor(file),
             reachedBy = reachedBy,
-            runsOn = runsOn(file, reachedBy),
-            uses = usedVariables(psi).map { (name, usage) ->
-                row(name, usage.element, usage.ranges, defined = false)
-            },
+            runsOn = if (inventoryRoot != null) null else runsOn(file, reachedBy),
+            uses = psi?.let { yaml ->
+                usedVariables(yaml).map { (name, usage) ->
+                    row(name, usage.element, usage.ranges, defined = false)
+                }
+            }.orEmpty(),
             defines = definedVariables(file).map { (name, usage) ->
                 row(name, usage.element, usage.ranges, defined = true)
             },
-            plays = playOutlines(file, psi),
-            imports = playImports(file, psi),
+            plays = psi?.let { playOutlines(file, it) }.orEmpty(),
+            imports = psi?.let { playImports(file, it) }.orEmpty(),
+            groups = inventoryRoot?.let { groupOutlines(file, it) }.orEmpty(),
         ))
+    }
+
+    // ---- what an inventory declares -----------------------------------------
+
+    /**
+     * Every group this inventory declares, and the plays that aim at it.
+     *
+     * The "who targets this group" question is answered by [GroupUsageService],
+     * which also answers Ctrl-click from the group header — one implementation,
+     * so the panel and the navigation cannot drift into disagreeing.
+     */
+    private fun groupOutlines(file: VirtualFile, root: VirtualFile): List<GroupOutline> {
+        val graph = InventoryGraphService.getInstance(project).graphFor(root)
+        val usages = GroupUsageService.getInstance(project)
+        val text = com.intellij.openapi.fileEditor.impl.LoadTextUtil.loadText(file).toString()
+        val unevaluated = usages.unevaluatedPlays(root)
+
+        return graph.groups.keys
+            .filter { it != InventoryGraph.ALL }
+            .sorted()
+            .map { name ->
+                val ranges = usages.declarationRanges(text, name)
+                GroupOutline(
+                    name = name,
+                    hostCount = graph.hostsInGroup(name).size,
+                    children = graph.groups[name]?.children.orEmpty().sorted(),
+                    offset = ranges.firstOrNull()?.first ?: 0,
+                    ranges = ranges,
+                    targetedBy = usages.usages(root, name).map { use ->
+                        GroupUse(
+                            playbook = use.playbook,
+                            offset = use.hostsKey.textOffset,
+                            pattern = use.pattern,
+                            exact = use.exact,
+                            matchedHosts = use.matchedHosts,
+                        )
+                    },
+                    varsFiles = groupVarsFiles(root, name),
+                    unevaluatedPlays = unevaluated,
+                )
+            }
+    }
+
+    /** `group_vars/<name>.yml` files beside the inventory, if any. */
+    private fun groupVarsFiles(root: VirtualFile, name: String): List<VirtualFile> {
+        val dir = root.findChild("group_vars") ?: return emptyList()
+        val direct = dir.children.orEmpty().filter {
+            !it.isDirectory && it.nameWithoutExtension == name
+        }
+        val nested = dir.findChild(name)?.takeIf { it.isDirectory }?.children.orEmpty()
+            .filter { !it.isDirectory }
+        return (direct + nested).sortedBy { it.name }
     }
 
     // ---- what a playbook declares -------------------------------------------

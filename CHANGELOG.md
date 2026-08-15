@@ -16,13 +16,39 @@ All notable changes to yamlix are recorded here. Versions follow
   *ambiguous*, *supplied by Ansible*, *undefined*, and *never wins* — the last
   being configuration that is written, indexed and always overridden.
 - `{{ item }}` and `ansible_loop_var` recognised as variables Ansible supplies.
+- **Inventories in the tool window.** Standing in an inventory now lists its
+  groups: how many hosts each holds, its child groups, the `group_vars` that
+  apply, and — the part with no answer anywhere else — every play whose
+  `hosts:` selects it. A group nothing targets says so, which is how dead
+  configuration becomes visible. INI inventories are recognised too; being
+  something other than YAML, they were previously told to open a file inside an
+  Ansible project, while inside one.
+- **Ctrl-click from an inventory group** goes to the plays that run on it. The
+  direction is inverted from every other jump on purpose: the caret is already
+  on the declaration, so the platform's answer was "Cannot find declaration to
+  go to", and the useful jump is to where the group is consumed. Both this and
+  the tool window ask one service, so they cannot come to differ.
 - A playbook's own declarations in the tool window: each play with the hosts it
   targets and how many that is, the roles it runs, and its `import_playbook`
   entries, interleaved in file order. A site playbook references no variables
   of its own, so the window previously had nothing to say about the very file
   that decides where everything runs.
 
+### Fixed
+
+- Find Usages no longer lists the same use twice when a role is reachable
+  through a symlink. A `playbooks/<area>/roles -> ../../roles` link makes every
+  role file reachable at two paths; they are one file on disk, so the second
+  was the same line counted again — and a rename would have rewritten the same
+  bytes twice. Navigation from the symlinked path still works: what is declined
+  is the claim that it is a separate use, not that it points where it points.
+
 ### Fixed (tool window)
+
+- Rows are fitted to the width the tool window actually has, with the full text
+  on hover. A tree row does not wrap and does not shrink, so docked at its
+  default width the end of every row — the inventories, the path, the part that
+  says *where* — sat past the edge with nothing to suggest it was there.
 
 - A file outside the project's content roots is reported as unindexed rather
   than undefined. Nothing there is indexed, so every lookup came back empty and
