@@ -28,6 +28,12 @@
         <platform.backend.documentation.targetProvider
             implementation="dev.yamlix.ansible.doc.AnsibleVarDocumentationTargetProvider"/>
 
+        <toolWindow
+            id="Ansible"
+            anchor="right"
+            icon="AllIcons.Toolwindows.ToolWindowStructure"
+            factoryClass="dev.yamlix.ansible.overview.AnsibleToolWindowFactory"/>
+
         <localInspection
             language="yaml"
             shortName="AnsibleUnresolvedReference"

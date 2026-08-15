@@ -62,6 +62,12 @@ object AnsibleMagicVariables {
             "Name of the role currently executing."),
         MagicVariable("ansible_role_names", MagicOrigin.RUNTIME,
             "Names of all roles in the current play."),
+        MagicVariable("item", MagicOrigin.RUNTIME,
+            "The current element of the enclosing `loop:` / `with_*`. Renamed " +
+                "by `loop_control: loop_var:`."),
+        MagicVariable("ansible_loop_var", MagicOrigin.RUNTIME,
+            "The name the current loop uses for its item — `item` unless " +
+                "`loop_control: loop_var:` changed it."),
         MagicVariable("omit", MagicOrigin.RUNTIME,
             "Sentinel that removes a parameter instead of passing it."),
         MagicVariable("ansible_check_mode", MagicOrigin.RUNTIME,

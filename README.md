@@ -8,7 +8,7 @@ It reuses the platform's YAML PSI. It registers no file type, does not claim
 
 ```
 IntelliJ IDEA 2025.2+ (sinceBuild 252, no upper bound)   Kotlin · Gradle 9 · IJPGP 2.x
-97 tests · IntelliJ Plugin Verifier: Compatible
+126 tests · IntelliJ Plugin Verifier: Compatible
 ```
 
 ---
@@ -152,7 +152,7 @@ the UI on a real project.
 Requires a JDK 17+ to run Gradle; the build provisions a JDK 21 toolchain.
 
 ```bash
-./gradlew test           # 97 tests
+./gradlew test           # 126 tests
 ./gradlew verifyPlugin   # IntelliJ Plugin Verifier
 ./gradlew runIde         # sandbox IDE with the plugin loaded
 ./gradlew buildPlugin    # build/distributions/yamlix-<version>.zip
