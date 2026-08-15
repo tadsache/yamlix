@@ -9,6 +9,9 @@ import com.intellij.psi.ElementManipulators
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiElementResolveResult
 import com.intellij.psi.PsiManager
+import com.intellij.openapi.roots.ProjectFileIndex
+import com.intellij.openapi.vfs.VFileProperty
+import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiPolyVariantReferenceBase
 import com.intellij.psi.ResolveResult
 import com.intellij.psi.util.CachedValue
@@ -35,6 +38,38 @@ abstract class AnsibleReferenceBase(
     range: TextRange,
     private val cacheKey: Key<CachedValue<ConcurrentHashMap<TextRange, List<PsiElement>>>>,
 ) : PsiPolyVariantReferenceBase<YAMLScalar>(element, range) {
+
+    /**
+     * A use seen through a symlink is the same use, and is claimed only once.
+     *
+     * A `playbooks/<area>/roles -> ../../roles` symlink — a common way to give
+     * a subtree its own role path — makes every role file reachable at two VFS
+     * paths. They are one file on disk, so Find Usages listed the same line
+     * twice, and a rename would have rewritten the same bytes twice.
+     *
+     * Only [isReferenceTo] is refused, never [resolve]: someone who opens the
+     * file through the symlinked path still gets working navigation from it.
+     * The claim being declined is "this is a distinct place where the variable
+     * is used", which is false, not "this text points at that declaration",
+     * which is true.
+     */
+    override fun isReferenceTo(element: PsiElement): Boolean =
+        !isSecondaryPath() && super.isReferenceTo(element)
+
+    /** True when this element's file is reached through a symlinked ancestor. */
+    private fun isSecondaryPath(): Boolean {
+        val file = element.containingFile?.virtualFile ?: return false
+        val root = ProjectFileIndex.getInstance(element.project).getContentRootForFile(file)
+        var current: VirtualFile? = file
+        // Stop at the content root. Anything above it is the project's own
+        // location — a project living under a symlinked path (/tmp on macOS)
+        // is not a duplicate of anything, and must not be silenced.
+        while (current != null && current != root) {
+            if (current.`is`(VFileProperty.SYMLINK)) return true
+            current = current.parent
+        }
+        return false
+    }
 
     /** The referenced text, with quotes stripped and Jinja left intact. */
     protected val refText: String get() = rangeInElement.substring(element.text)
