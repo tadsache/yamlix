@@ -1,14 +1,64 @@
 <idea-plugin>
     <id>dev.yamlix.ansible</id>
-    <name>Yamlix - Ansible Navigation</name>
-    <vendor>yamlix</vendor>
+    <name>Yamlix - Ansible Variable Resolution</name>
+    <vendor url="https://github.com/tadsache/yamlix">tadsache</vendor>
 
     <description><![CDATA[
-    Jump-to-definition and variable resolution for Ansible projects.
-    Reuses the platform's YAML PSI; registers no file type and does not claim
-    <code>*.yml</code>. Ansible context is detected structurally, per file,
-    at reference-contribution time.
+    <p><b>Which value does this variable actually have — on which host, and why?</b></p>
+
+    <p>A variable in Ansible does not have <i>a</i> definition. It has as many as the
+    precedence table allows, and which one wins depends on the host, the inventory, and
+    where in the play you are. Yamlix models that properly.</p>
+
+    <ul>
+      <li><b>Ansible tool window</b> — every variable the open file uses and defines, its
+      effective value, which playbooks reach the file and which hosts that means. Select a
+      variable to see every definition site with the inventories and groups it holds on.</li>
+      <li><b>Ctrl/⌘+Click on <code>{{ a_variable }}</code></b> lists every definition site,
+      ordered by what applies at the caret — not a name-based list that reads the same
+      everywhere.</li>
+      <li><b>Quick Documentation</b> shows the effective value per inventory and host, with
+      hosts that agree collapsed and hosts that differ kept apart.</li>
+      <li><b>Navigation</b> for roles, <code>include_role</code>, <code>include_tasks</code>,
+      <code>vars_files</code>, <code>include_vars</code>, <code>template</code>/<code>copy</code>
+      sources, <code>notify</code> handlers, and <code>hosts:</code> patterns into INI and YAML
+      inventories.</li>
+      <li><b>Find Usages</b> from a definition to every use, including through
+      <code>include_tasks</code>.</li>
+    </ul>
+
+    <p><b>It never guesses.</b> Anything Ansible can only know at run time is rendered as
+    unresolved with the raw template shown: a fact-templated <code>include_vars</code> lists
+    every candidate and promotes none; <code>register</code>, <code>hostvars</code>,
+    <code>lookup()</code> and vault are named explicitly. There is deliberately no code path
+    that invents a value.</p>
+
+    <p>The precedence rules were verified by running <code>ansible-playbook</code> and
+    <code>ansible-inventory</code> against a fixture project with ansible-core 2.20.4 — not
+    reasoned from the documentation. Two fixture projects serve as the executable
+    specification, and a test asserts the code cannot drift from them.</p>
+
+    <p>Reuses the platform's YAML PSI. Registers no file type, does not claim
+    <code>*.yml</code>, and never shells out to <code>ansible</code>. Ansible context is
+    detected structurally, per file.</p>
+
+    <p><i>Not affiliated with or endorsed by Red Hat. Ansible is a trademark of Red Hat, Inc.</i></p>
     ]]></description>
+
+    <change-notes><![CDATA[
+    <p>See the <a href="https://github.com/tadsache/yamlix/blob/main/CHANGELOG.md">changelog</a>
+    for the full history.</p>
+    <ul>
+      <li>New Ansible tool window: the variables of the file you are reading, their effective
+      values, and where each one comes from.</li>
+      <li>Variable resolution roughly twenty times faster on fleet-sized projects.</li>
+      <li>A <code>hosts:</code> pattern that cannot be evaluated no longer makes a role's
+      variables resolve to nothing.</li>
+      <li><code>group_vars</code>/<code>host_vars</code> beside the playbook are recognised and
+      correctly outrank the inventory's own.</li>
+      <li>Playbooks are found anywhere under the <code>ansible.cfg</code> directory.</li>
+    </ul>
+    ]]></change-notes>
 
     <depends>com.intellij.modules.platform</depends>
     <depends>org.jetbrains.plugins.yaml</depends>

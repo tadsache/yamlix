@@ -1,10 +1,27 @@
 # yamlix
 
-An IntelliJ IDEA plugin that gives Ansible projects **jump-to-definition** and
-**variable resolution** — the two things that make a large playbook readable.
+**Which value does this variable actually have — on which host, and why?**
+
+An IntelliJ IDEA plugin for Ansible projects. A variable in Ansible does not have
+*a* definition: it has as many as the precedence table allows, and which one wins
+depends on the host, the inventory, and where in the play you are. Yamlix models
+that properly, and refuses to guess when the answer is only knowable at run time.
+
+The precedence rules were verified by running `ansible-playbook` and
+`ansible-inventory` against a fixture project with **ansible-core 2.20.4** — not
+reasoned from the documentation, which is wrong in at least two places this
+repository records.
 
 It reuses the platform's YAML PSI. It registers no file type, does not claim
 `*.yml`, and never shells out to `ansible`.
+
+### Why another Ansible plugin?
+
+The Marketplace has several, and they are better than this one at breadth —
+module completion, schemas, linting, vault. None of them answer the question
+above. If you want syntax help writing a task, use one of those. If you want to
+know why `artifact_repo` is the canary URL on exactly one host in one
+environment, that is what this is for. They coexist.
 
 ```
 IntelliJ IDEA 2025.2+ (sinceBuild 252, no upper bound)   Kotlin · Gradle 9 · IJPGP 2.x
