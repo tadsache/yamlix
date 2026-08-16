@@ -1,0 +1,41 @@
+name: Feature request
+description: Something the plugin should be able to answer and cannot.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This plugin deliberately answers one question — which value a variable
+        actually has, on which host, and why. Module completion, schemas,
+        linting and vault support belong to the other Ansible plugins on the
+        Marketplace, and it's meant to coexist with them rather than replace
+        them. Requests that widen the scope that far will probably be declined,
+        which is not a judgement on the idea.
+
+  - type: textarea
+    id: question
+    attributes:
+      label: What are you trying to find out?
+      description: >
+        The question you had in front of the code, not the UI you imagined for
+        it. "Which host does this override actually apply to" is a better
+        starting point than "add a column to the tool window".
+    validations:
+      required: true
+
+  - type: textarea
+    id: today
+    attributes:
+      label: How do you answer it today?
+      description: Grep, `ansible-inventory`, asking a colleague, guessing.
+
+  - type: checkboxes
+    id: runtime
+    attributes:
+      label: Statically knowable?
+      options:
+        - label: >
+            The answer is knowable from the files alone, without running the
+            playbook. (If it needs `register`, `hostvars`, `lookup()` or vault,
+            the plugin will name it as unresolvable rather than guess — that is
+            on purpose.)

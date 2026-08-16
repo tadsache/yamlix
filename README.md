@@ -2,7 +2,8 @@
 
 **Which value does this variable actually have — on which host, and why?**
 
-An IntelliJ IDEA plugin for Ansible projects. A variable in Ansible does not have
+A JetBrains IDE plugin for Ansible projects — it depends only on the platform and
+bundled YAML, so it runs in IDEA, PyCharm, GoLand and the rest. A variable in Ansible does not have
 *a* definition: it has as many as the precedence table allows, and which one wins
 depends on the host, the inventory, and where in the play you are. Yamlix models
 that properly, and refuses to guess when the answer is only knowable at run time.
@@ -24,8 +25,8 @@ know why `artifact_repo` is the canary URL on exactly one host in one
 environment, that is what this is for. They coexist.
 
 ```
-IntelliJ IDEA 2025.2+ (sinceBuild 252, no upper bound)   Kotlin · Gradle 9 · IJPGP 2.x
-126 tests · IntelliJ Plugin Verifier: Compatible
+Any JetBrains IDE 2025.2+ (sinceBuild 252, no upper bound)   Kotlin · Gradle 9 · IJPGP 2.x
+216 tests · Plugin Verifier: Compatible on IDEA CE/Ultimate, PyCharm, GoLand
 ```
 
 ---
@@ -139,9 +140,6 @@ two places where real Ansible contradicted the obvious prediction:
 `src/test/testData/fixture` is a byte-identical copy, and a test asserts it stays
 that way — so the specification cannot be quietly edited to match the code.
 
-The three build reports (`MILESTONE-*-REPORT.md`) record what was built, where
-the platform fought back, and every deviation from the spec with its reason.
-
 A second, independent fixture — `fleet-fixture/`, documented in
 `fleet-fixture/FLEET-FIXTURE-CASES.md` — exists purely to keep real-world bug
 reports from regressing: a project-root `group_vars/all.yml` sibling to
@@ -169,7 +167,7 @@ the UI on a real project.
 Requires a JDK 17+ to run Gradle; the build provisions a JDK 21 toolchain.
 
 ```bash
-./gradlew test           # 126 tests
+./gradlew test           # 216 tests
 ./gradlew verifyPlugin   # IntelliJ Plugin Verifier
 ./gradlew runIde         # sandbox IDE with the plugin loaded
 ./gradlew buildPlugin    # build/distributions/yamlix-<version>.zip
@@ -211,6 +209,13 @@ likely thing to break on a platform upgrade.
 **Extra vars (`-e`) always win and are invisible from a repository.** Every
 resolution says so.
 
+**The tool window's existence is decided once, at project open.** It appears
+only in projects that hold an `ansible.cfg` or an Ansible layout within two
+directories of a content root — so it does not sit permanently empty on the
+stripe of every unrelated project. A repository that gains its first
+`ansible.cfg` mid-session gets the window on the next start; the platform
+offers no way to re-ask the question.
+
 **The Quick Documentation popup renders through Swing's `HTMLEditorKit`** — an
 HTML 3.2 engine. No flexbox, no grid, no `white-space`. The layout is built from
 short labels and the platform's own markup constants because anything wider gets
@@ -246,9 +251,24 @@ Two pieces are worth knowing about:
 
 ## Status
 
-A working plugin with a thorough test suite, not a released product. Not on the
-JetBrains Marketplace. No tool window yet — the role graph is currently walked by
-three separate traversals that should be one service first.
+A working plugin with a thorough test suite, being prepared for its first
+JetBrains Marketplace release. Until it lands there, install the zip from
+`buildPlugin` by hand.
+
+Known rough edges beyond the limitations above: the role graph is walked by
+three separate traversals that should be one service, and publishing is not yet
+automated — a `v*` tag builds and drafts a GitHub release, but the Marketplace
+upload is manual.
+
+---
+
+## Contributing
+
+Bug reports are the most useful thing you can send — this plugin only gets the
+answer wrong on a project layout nobody thought of. [CONTRIBUTING.md](CONTRIBUTING.md)
+covers the build, the rule that the fixtures are the specification, and why a
+fix starts with a fixture case. Vulnerabilities go to the address in
+[SECURITY.md](SECURITY.md) rather than to a public issue.
 
 ---
 

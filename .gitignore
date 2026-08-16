@@ -14,5 +14,8 @@ build/
 *.iml
 out/
 
+# Local agent settings — machine-specific paths, of no use to anyone else
+.claude/
+
 # macOS
 .DS_Store

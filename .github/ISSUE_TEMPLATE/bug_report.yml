@@ -1,0 +1,68 @@
+name: Bug report
+description: The plugin gave a wrong answer, or no answer where there is one.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The most useful report is a project layout that reproduces the problem.
+        Invented names are fine and preferred — a layout becomes a fixture case
+        and then a regression test, so please don't paste anything real.
+
+  - type: textarea
+    id: layout
+    attributes:
+      label: Project layout
+      description: >
+        The directory shape that breaks it, and the contents of the files that
+        matter — the relevant `ansible.cfg`, inventory, `group_vars`, role
+        `defaults`, playbook. Rename everything.
+      placeholder: |
+        ansible.cfg          → roles_path = ./roles:./shared-roles
+        inventories/prod/hosts
+        group_vars/all.yml   → app_port: 8080
+        playbooks/site.yml   → hosts: web
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what you got
+      description: >
+        Where the caret was, and which answer the plugin gave. If real Ansible
+        disagrees with it, paste what `ansible-playbook` or `ansible-inventory`
+        actually printed — real Ansible wins that argument.
+    validations:
+      required: true
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: ide
+    attributes:
+      label: IDE and build number
+      description: Help → About, then Copy. For example "IntelliJ IDEA 2025.2.6 (IC-252.28502.1)".
+    validations:
+      required: true
+
+  - type: input
+    id: ansible-version
+    attributes:
+      label: ansible-core version
+      description: If you compared against real Ansible. `ansible --version`.
+      placeholder: "2.20.4"
+
+  - type: textarea
+    id: stacktrace
+    attributes:
+      label: Exception, if the IDE reported one
+      description: From the "IDE Internal Errors" balloon, or idea.log.
+      render: text

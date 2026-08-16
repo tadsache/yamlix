@@ -14,7 +14,7 @@ import dev.yamlix.ansible.vars.VariableReportBuilder
 import org.jetbrains.yaml.psi.YAMLScalar
 
 /**
- * Milestone 3 — Quick Documentation.
+ * Quick Documentation.
  *
  * The test set is NAVIGATION-CASES.md §3: everything listed there as
  * statically unresolvable must render as unresolved, showing the raw template,
