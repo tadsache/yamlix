@@ -46,6 +46,32 @@ intellijPlatform {
         }
     }
 
+    // The Marketplace has rejected unsigned plugins since 2021. The key lives
+    // only in CI secrets — a signed build is not reproducible on a laptop, and
+    // should not be: a certificate that never leaves the release pipeline
+    // cannot be leaked from a developer machine.
+    //
+    // `signPlugin` is skipped when the variables are absent, so `buildPlugin`
+    // keeps working for everyone. That means the zip from a local build is
+    // unsigned and the Marketplace will not take it, which is correct.
+    signing {
+        certificateChain = providers.environmentVariable("CERTIFICATE_CHAIN")
+        privateKey = providers.environmentVariable("PRIVATE_KEY")
+        password = providers.environmentVariable("PRIVATE_KEY_PASSWORD")
+    }
+
+    publishing {
+        token = providers.environmentVariable("PUBLISH_TOKEN")
+
+        // A pre-release version (0.2.0-beta.1) goes to the channel named by its
+        // qualifier; a plain version goes to the default (stable) channel. The
+        // channel has to be subscribed to in the IDE, so this is what keeps an
+        // "install and see" build off everyone's update check.
+        channels = providers.gradleProperty("pluginVersion").map { version ->
+            listOf(version.substringAfter('-', "").substringBefore('.').ifEmpty { "default" })
+        }
+    }
+
     pluginVerification {
         ides {
             recommended()

@@ -94,13 +94,80 @@ jobs:
           name: yamlix-plugin
           path: build/distributions/*.zip
 
-      # Tagging is the release. Publishing to the Marketplace stays manual
-      # until a token is configured, so a tag can never push something nobody
-      # looked at.
+  # Tagging is the release. The job runs only on a `v*` tag, and only after the
+  # tests and the Plugin Verifier have both passed on that exact commit.
+  #
+  # `environment: marketplace` is the stop button: give that environment a
+  # required reviewer in the repository settings and a tag waits for a human
+  # before anything reaches the Marketplace. Without a reviewer configured it
+  # publishes straight through, which is a decision, not an accident — see
+  # RELEASING.md.
+  release:
+    needs: [test, verify, package]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: marketplace
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # The tag and gradle.properties must agree, or the Marketplace ends up
+      # holding a version nobody can check out. Catching it here costs seconds;
+      # catching it after publication costs a version number, since the
+      # Marketplace will not let the same one be uploaded twice.
+      - name: Check the tag matches pluginVersion
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          declared="$(grep '^pluginVersion' gradle.properties | cut -d= -f2 | tr -d ' ')"
+          if [ "$tag" != "$declared" ]; then
+            echo "Tag $GITHUB_REF_NAME says $tag, gradle.properties says $declared." >&2
+            exit 1
+          fi
+
+      # signPlugin runs as a dependency of publishPlugin; naming it here means a
+      # signing failure reports as a signing failure rather than as a publish
+      # one.
+      - name: Sign plugin
+        env:
+          CERTIFICATE_CHAIN: ${{ secrets.CERTIFICATE_CHAIN }}
+          PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+          PRIVATE_KEY_PASSWORD: ${{ secrets.PRIVATE_KEY_PASSWORD }}
+        run: ./gradlew signPlugin --no-configuration-cache
+
+      # signPlugin succeeds on a chain that the Marketplace will then reject.
+      # This checks the artifact rather than the exit code, so a bad certificate
+      # fails here instead of consuming the version number upstream.
+      - name: Verify the signature
+        env:
+          CERTIFICATE_CHAIN: ${{ secrets.CERTIFICATE_CHAIN }}
+        run: ./gradlew verifyPluginSignature --no-configuration-cache
+
+      - name: Publish to the JetBrains Marketplace
+        env:
+          CERTIFICATE_CHAIN: ${{ secrets.CERTIFICATE_CHAIN }}
+          PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+          PRIVATE_KEY_PASSWORD: ${{ secrets.PRIVATE_KEY_PASSWORD }}
+          PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+        run: ./gradlew publishPlugin --no-configuration-cache
+
+      # The signed zip, not the unsigned one from `package` — what lands on the
+      # release is then the same artifact the Marketplace received, so someone
+      # sideloading it gets a build with a verifiable origin.
+      #
+      # Still a draft: the Marketplace holds the version for its own review
+      # anyway, so there is nothing to gain from announcing it before that
+      # clears.
       - name: Draft release
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           draft: true
-          files: build/distributions/*.zip
+          files: build/distributions/*-signed.zip
           body_path: CHANGELOG.md

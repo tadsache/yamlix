@@ -255,10 +255,13 @@ A working plugin with a thorough test suite, being prepared for its first
 JetBrains Marketplace release. Until it lands there, install the zip from
 `buildPlugin` by hand.
 
-Known rough edges beyond the limitations above: the role graph is walked by
-three separate traversals that should be one service, and publishing is not yet
-automated — a `v*` tag builds and drafts a GitHub release, but the Marketplace
-upload is manual.
+Releasing is automated: a `v*` tag runs the tests and the Plugin Verifier,
+signs the plugin, publishes it to the Marketplace and drafts a GitHub release
+with the same signed zip. [RELEASING.md](RELEASING.md) covers the setup, and
+the one manual step JetBrains requires for a plugin's first ever upload.
+
+Known rough edge beyond the limitations above: the role graph is walked by
+three separate traversals that should be one service.
 
 ---
 
