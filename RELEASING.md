@@ -52,11 +52,25 @@ identifies *the plugin*, and continuity of the key across versions is what
 matters, not a CA vouching for you.
 
 ```bash
-openssl genpkey -aes-256-cbc -algorithm RSA -out private.pem -pkeyopt rsa_keygen_bits:4096
-openssl req -key private.pem -new -x509 -days 3650 -out chain.crt
+mkdir -p ~/.yamlix-signing && chmod 700 ~/.yamlix-signing
+
+openssl genrsa -traditional -out ~/.yamlix-signing/private.pem 4096
+chmod 600 ~/.yamlix-signing/private.pem
+
+openssl req -key ~/.yamlix-signing/private.pem -new -x509 -days 3650 \
+  -out ~/.yamlix-signing/chain.crt \
+  -subj "/CN=yamlix/O=tadsache/emailAddress=support@yamlix.dev"
 ```
 
-The first command asks for a passphrase; that becomes `PRIVATE_KEY_PASSWORD`.
+Two details that are not decoration:
+
+- **`-traditional`.** OpenSSL 3 writes PKCS#8 by default, and the Marketplace
+  ZIP Signer wants a `-----BEGIN RSA PRIVATE KEY-----` PEM. Check the first line
+  of the file if signing fails to read the key.
+- **No passphrase.** An encrypted key buys nothing here: in CI it would mean
+  storing the passphrase next to the key it protects, and locally the key is
+  protected by file permissions either way. If you do encrypt it, set
+  `PRIVATE_KEY_PASSWORD` as well — everything supports it, nothing requires it.
 
 **Back both files up somewhere you will still have in three years, outside this
 repository.** Losing the key does not lock you out of the Marketplace — JetBrains
@@ -71,13 +85,25 @@ working tree entirely.
 | Secret | Value |
 |---|---|
 | `PRIVATE_KEY` | the whole of `private.pem`, `-----BEGIN` line through `-----END` line |
-| `PRIVATE_KEY_PASSWORD` | the passphrase from `openssl genpkey` |
 | `CERTIFICATE_CHAIN` | the whole of `chain.crt` |
 | `PUBLISH_TOKEN` | a Marketplace token, from [your JetBrains profile](https://plugins.jetbrains.com/author/me/tokens) |
+| `PRIVATE_KEY_PASSWORD` | only if you encrypted the key; otherwise leave it unset |
 
 Paste the PEM files whole, including the header and footer lines and the
 trailing newline. A chain that is missing its final newline fails signing with
 an error that does not mention newlines.
+
+The workflow writes both back out to files under `RUNNER_TEMP` before Gradle
+sees them, because the build takes paths rather than PEM text — see the comment
+on `signing { }` in `build.gradle.kts` for why.
+
+To sign locally — which you need exactly once, for the first upload:
+
+```bash
+export CERTIFICATE_CHAIN_FILE="$HOME/.yamlix-signing/chain.crt"
+export PRIVATE_KEY_FILE="$HOME/.yamlix-signing/private.pem"
+./gradlew signPlugin verifyPluginSignature --no-configuration-cache
+```
 
 ## One-time: the approval gate
 

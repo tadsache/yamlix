@@ -54,9 +54,18 @@ intellijPlatform {
     // `signPlugin` is skipped when the variables are absent, so `buildPlugin`
     // keeps working for everyone. That means the zip from a local build is
     // unsigned and the Marketplace will not take it, which is correct.
+    // Files, not the PEM text itself. Passing the chain as a string makes
+    // `verifyPluginSignature` build a command line with the certificate given
+    // twice — once as the `-cert` file it writes to build/tmp, and once more as
+    // a stray positional argument the CLI rejects with a usage error that names
+    // nothing. CI writes the secrets to files and points these at them.
     signing {
-        certificateChain = providers.environmentVariable("CERTIFICATE_CHAIN")
-        privateKey = providers.environmentVariable("PRIVATE_KEY")
+        certificateChainFile = layout.file(
+            providers.environmentVariable("CERTIFICATE_CHAIN_FILE").map { File(it) },
+        )
+        privateKeyFile = layout.file(
+            providers.environmentVariable("PRIVATE_KEY_FILE").map { File(it) },
+        )
         password = providers.environmentVariable("PRIVATE_KEY_PASSWORD")
     }
 
@@ -104,6 +113,14 @@ intellijPlatform {
 }
 
 tasks {
+    // verifyPluginSignature reads the zip that signPlugin writes, and the
+    // plugin does not wire the two together. Gradle refuses to run both in one
+    // invocation without the edge — correctly, since the order would otherwise
+    // be undefined and the verification could pass against a stale artifact.
+    verifyPluginSignature {
+        dependsOn(signPlugin)
+    }
+
     test {
         useJUnit()
         systemProperty("idea.home.path", "")

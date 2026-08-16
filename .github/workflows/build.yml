@@ -132,13 +132,29 @@ jobs:
             exit 1
           fi
 
-      # signPlugin runs as a dependency of publishPlugin; naming it here means a
-      # signing failure reports as a signing failure rather than as a publish
-      # one.
-      - name: Sign plugin
+      # The build takes the key and chain as files rather than as PEM text —
+      # passing the chain as a string makes verifyPluginSignature build a
+      # command line carrying the certificate twice, and the CLI rejects it with
+      # a usage error that names nothing. RUNNER_TEMP is wiped with the runner.
+      - name: Materialise the signing key
         env:
           CERTIFICATE_CHAIN: ${{ secrets.CERTIFICATE_CHAIN }}
           PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+        run: |
+          dir="$RUNNER_TEMP/signing"
+          mkdir -p "$dir" && chmod 700 "$dir"
+          printf '%s\n' "$CERTIFICATE_CHAIN" > "$dir/chain.crt"
+          printf '%s\n' "$PRIVATE_KEY" > "$dir/private.pem"
+          chmod 600 "$dir"/*
+          echo "CERTIFICATE_CHAIN_FILE=$dir/chain.crt" >> "$GITHUB_ENV"
+          echo "PRIVATE_KEY_FILE=$dir/private.pem" >> "$GITHUB_ENV"
+
+      # signPlugin runs as a dependency of publishPlugin; naming it here means a
+      # signing failure reports as a signing failure rather than as a publish
+      # one. PRIVATE_KEY_PASSWORD is only needed for an encrypted key, and is
+      # harmless when the secret does not exist.
+      - name: Sign plugin
+        env:
           PRIVATE_KEY_PASSWORD: ${{ secrets.PRIVATE_KEY_PASSWORD }}
         run: ./gradlew signPlugin --no-configuration-cache
 
@@ -147,13 +163,11 @@ jobs:
       # fails here instead of consuming the version number upstream.
       - name: Verify the signature
         env:
-          CERTIFICATE_CHAIN: ${{ secrets.CERTIFICATE_CHAIN }}
+          PRIVATE_KEY_PASSWORD: ${{ secrets.PRIVATE_KEY_PASSWORD }}
         run: ./gradlew verifyPluginSignature --no-configuration-cache
 
       - name: Publish to the JetBrains Marketplace
         env:
-          CERTIFICATE_CHAIN: ${{ secrets.CERTIFICATE_CHAIN }}
-          PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
           PRIVATE_KEY_PASSWORD: ${{ secrets.PRIVATE_KEY_PASSWORD }}
           PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
         run: ./gradlew publishPlugin --no-configuration-cache
