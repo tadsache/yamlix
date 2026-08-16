@@ -1,5 +1,9 @@
 # yamlix
 
+[![JetBrains Marketplace](https://img.shields.io/jetbrains/plugin/v/33589-yamlix-for-ansible?label=Marketplace)](https://plugins.jetbrains.com/plugin/33589-yamlix-for-ansible)
+[![Downloads](https://img.shields.io/jetbrains/plugin/d/33589-yamlix-for-ansible)](https://plugins.jetbrains.com/plugin/33589-yamlix-for-ansible)
+[![Build](https://github.com/tadsache/yamlix/actions/workflows/build.yml/badge.svg)](https://github.com/tadsache/yamlix/actions/workflows/build.yml)
+
 **Which value does this variable actually have — on which host, and why?**
 
 A JetBrains IDE plugin for Ansible projects — it depends only on the platform and
@@ -251,9 +255,11 @@ Two pieces are worth knowing about:
 
 ## Status
 
-A working plugin with a thorough test suite, being prepared for its first
-JetBrains Marketplace release. Until it lands there, install the zip from
-`buildPlugin` by hand.
+Submitted to the JetBrains Marketplace as
+[plugin 33589](https://plugins.jetbrains.com/plugin/33589-yamlix-for-ansible)
+and awaiting review. Until that clears, install the signed zip from the
+[releases page](https://github.com/tadsache/yamlix/releases) by hand:
+**Settings → Plugins → ⚙ → Install Plugin from Disk**.
 
 Releasing is automated: a `v*` tag runs the tests and the Plugin Verifier,
 signs the plugin, publishes it to the Marketplace and drafts a GitHub release
