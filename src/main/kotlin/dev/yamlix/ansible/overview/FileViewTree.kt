@@ -16,6 +16,14 @@ object FileViewTree {
         SiteStatus.WINS, SiteStatus.MAY_WIN, SiteStatus.OVERRIDDEN, SiteStatus.NOT_IN_SCOPE,
     )
 
+    /**
+     * How many losing definitions it takes before they are worth folding.
+     *
+     * Below this the fold costs more than it saves: it trades two visible rows
+     * for one row and a click.
+     */
+    private const val OVERRIDDEN_FOLD_THRESHOLD = 3
+
     fun build(state: ViewState): List<OverviewTreeNode> {
         val view = when (state) {
             ViewState.NotAnsible ->
@@ -131,9 +139,30 @@ object FileViewTree {
             compareBy({ SITE_ORDER.indexOf(it.status) }, { -it.scopeRank }),
         )
 
+        fun siteNode(site: VariableSite) = OverviewTreeNode(SiteNode(site, base, showValue))
+
+        // The same argument the panel makes about expanding every variable, one
+        // level down: a variable resolved across four inventories carries a
+        // dozen definitions that lost, and expanding it buries the two that can
+        // still win under ten that cannot. They are folded rather than dropped,
+        // because "where else is this written" is a real question — just not the
+        // one that made you open the row.
+        val lost = ordered.filter { it.status == SiteStatus.OVERRIDDEN }
+        if (lost.size < OVERRIDDEN_FOLD_THRESHOLD) {
+            return OverviewTreeNode(VariableRowNode(row), ordered.map(::siteNode))
+        }
+
+        // The fold takes the place of the block it replaces rather than going
+        // last, so the rows stay in precedence order around it.
+        val rank = SITE_ORDER.indexOf(SiteStatus.OVERRIDDEN)
+        val above = ordered.filter { SITE_ORDER.indexOf(it.status) < rank }
+        val below = ordered.filter { SITE_ORDER.indexOf(it.status) > rank }
+
         return OverviewTreeNode(
             VariableRowNode(row),
-            ordered.map { OverviewTreeNode(SiteNode(it, base, showValue)) },
+            above.map(::siteNode) +
+                OverviewTreeNode(OverriddenSitesNode(lost.size), lost.map(::siteNode)) +
+                below.map(::siteNode),
         )
     }
 
@@ -204,7 +233,11 @@ data class VariableRowNode(val row: VariableRow) : OverviewNode {
         get() = when (row.status) {
             RowStatus.RESOLVED -> AllIcons.Nodes.Constant
             RowStatus.VARIES -> AllIcons.Nodes.Variable
-            RowStatus.AMBIGUOUS -> AllIcons.General.Warning
+            // A question, not a complaint. `include_vars: "{{ os_family }}.yml"`
+            // has a set of answers by design, and a warning triangle would call
+            // idiomatic Ansible a defect. What the reader needs to know is that
+            // the answer depends on run-time state, which is what "?" says.
+            RowStatus.AMBIGUOUS -> AllIcons.General.ContextHelp
             RowStatus.PROVIDED_BY_ANSIBLE -> AllIcons.Nodes.Static
             RowStatus.RUNTIME -> AllIcons.Nodes.Plugin
             // A loop is an iteration, not a defect: the same neutral icon as
@@ -281,6 +314,19 @@ data class GroupVarsNode(val file: VirtualFile, private val base: VirtualFile?) 
  */
 private const val MAX_SITE_VALUE = 40
 
+/**
+ * The definitions that lost, behind one row.
+ *
+ * Greyed like the sites it stands for, and carrying the count so the row still
+ * answers "how much am I not looking at" without being opened.
+ */
+data class OverriddenSitesNode(private val count: Int) : OverviewNode {
+    override val text: String
+        get() = "$count overridden ${if (count == 1) "definition" else "definitions"}"
+
+    override val icon: Icon get() = AllIcons.Nodes.EmptyNode
+}
+
 data class SiteNode(
     val site: VariableSite,
     private val base: VirtualFile? = null,
@@ -299,11 +345,19 @@ data class SiteNode(
             add(pathLabel())
         }.joinToString("  ·  ")
 
-    /** The winner is ticked; everything else is a bullet and rendered dim. */
+    /**
+     * Ticked wins, "?" might, bullet lost — and everything but the winner is
+     * rendered dim.
+     *
+     * A candidate is not a defect. `may win at run time` describes a site the
+     * plugin cannot rank without knowing a fact, so it takes the question mark
+     * rather than the warning triangle it used to carry; the triangle claimed
+     * something was wrong with a file that is merely conditional.
+     */
     override val icon: Icon
         get() = when (site.status) {
             SiteStatus.WINS -> AllIcons.Actions.Checked
-            SiteStatus.MAY_WIN -> AllIcons.General.Warning
+            SiteStatus.MAY_WIN -> AllIcons.General.ContextHelp
             else -> AllIcons.Nodes.EmptyNode
         }
 

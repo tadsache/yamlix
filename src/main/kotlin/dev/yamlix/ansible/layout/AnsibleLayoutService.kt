@@ -4,6 +4,7 @@ import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
 import com.intellij.openapi.fileEditor.impl.LoadTextUtil
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.roots.ProjectRootManager
 import com.intellij.openapi.util.Key
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VirtualFile
@@ -84,6 +85,14 @@ class AnsibleLayoutService(private val project: Project) {
 
         /** How far above a file to look for a project root. */
         private const val MAX_BASE_SEARCH_DEPTH = 8
+
+        /**
+         * How far below a content root to look for any Ansible project at all.
+         *
+         * Two levels covers a repository that keeps its Ansible under
+         * `ansible/` or `deploy/<env>/`, without walking a monorepo.
+         */
+        private const val MAX_APPLICABILITY_DEPTH = 2
 
         /** Directory names that hold inventories, by convention. */
         private val INVENTORY_DIR_NAMES = listOf("inventories", "inventory")
@@ -199,6 +208,36 @@ class AnsibleLayoutService(private val project: Project) {
     /** True when [file] sits anywhere inside a directory tree carrying an `ansible.cfg`. */
     fun isAnsibleContext(file: VirtualFile): Boolean =
         cfgFor(file) != null || PlayStructure.enclosingRoleDir(file) != null
+
+    /**
+     * Whether this project contains an Ansible project anywhere near its
+     * content roots. Decides whether the tool window exists at all, so that a
+     * project with no Ansible in it does not carry a permanently empty tab.
+     *
+     * A shallow VFS walk rather than an index query on purpose: this is asked
+     * while the project opens, long before the first index is built.
+     *
+     * The answer is taken once per project open. A repository that gains its
+     * first `ansible.cfg` mid-session gets the tool window on the next start —
+     * the platform has no way to re-run the question, and the alternative is
+     * showing the tab to everyone.
+     */
+    fun hasAnsibleContent(): Boolean =
+        ProjectRootManager.getInstance(project).contentRoots.any {
+            it.isValid && it.isDirectory && holdsAnsibleProject(it, MAX_APPLICABILITY_DEPTH)
+        }
+
+    private fun holdsAnsibleProject(dir: VirtualFile, depth: Int): Boolean {
+        if (dir.findChild(AnsibleVfsListener.ANSIBLE_CFG)?.isDirectory == false) return true
+        if (looksLikeProjectRoot(dir)) return true
+        if (depth <= 0) return false
+        return dir.children.orEmpty().any { child ->
+            child.isDirectory &&
+                !child.name.startsWith(".") &&
+                child.name.lowercase() !in NON_PLAYBOOK_DIRS &&
+                holdsAnsibleProject(child, depth - 1)
+        }
+    }
 
     // ---- role search path (rule R1) ---------------------------------------
 

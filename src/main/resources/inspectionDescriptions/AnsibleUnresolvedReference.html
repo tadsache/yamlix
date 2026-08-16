@@ -1,0 +1,34 @@
+<html>
+<body>
+Reports Ansible roles, includes and file references that resolve to nothing.
+
+<p>
+    A reference is reported when no file on Ansible's own search path can satisfy it &mdash;
+    a <code>roles:</code> entry with no matching directory under <code>roles/</code> or
+    <code>roles_path</code>, an <code>include_tasks:</code> naming a file that is not beside
+    the role's <code>tasks/</code> or the playbook, a <code>template:</code> <code>src:</code>
+    missing from <code>templates/</code> and <code>files/</code>, or a <code>notify:</code>
+    naming no handler.
+</p>
+
+<p>
+    A Jinja-templated target is treated differently. <code>include_vars:
+    "{{ ansible_os_family }}.yml"</code> legitimately has a <em>set</em> of answers, and is
+    left alone as long as at least one candidate file exists. It is reported only when the
+    pattern matches nothing at all, because then no possible fact value would make it resolve.
+</p>
+
+<p>
+    Anything whose value Ansible can only know at run time is never reported. The inspection
+    reads the same resolution model as Ctrl/&#8984;+Click and completion, so it cannot
+    disagree with what navigation does.
+</p>
+
+<p>
+    A false positive here usually means the project's layout is not the one the plugin
+    inferred &mdash; most often a <code>roles_path</code> in an <code>ansible.cfg</code> the
+    plugin did not find, or one meant to be resolved from a working directory other than the
+    config's own.
+</p>
+</body>
+</html>

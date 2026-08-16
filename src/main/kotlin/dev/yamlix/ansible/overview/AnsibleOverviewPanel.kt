@@ -276,7 +276,7 @@ class AnsibleOverviewPanel(private val project: Project) :
             // A site that lost is greyed whole. The outcome used to be a word
             // ("overridden"); carrying it in the weight instead means the eye
             // finds the winner without reading anything.
-            val subdued = (node as? SiteNode)?.subdued == true
+            val subdued = (node as? SiteNode)?.subdued == true || node is OverriddenSitesNode
             val nameAttributes =
                 if (subdued) SimpleTextAttributes.GRAYED_ATTRIBUTES
                 else SimpleTextAttributes.REGULAR_ATTRIBUTES

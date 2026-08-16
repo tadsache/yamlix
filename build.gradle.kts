@@ -1,4 +1,6 @@
+import org.jetbrains.intellij.platform.gradle.IntelliJPlatformType
 import org.jetbrains.intellij.platform.gradle.TestFrameworkType
+import org.jetbrains.intellij.platform.gradle.models.ProductRelease
 
 plugins {
     kotlin("jvm") version "2.1.20"
@@ -47,6 +49,30 @@ intellijPlatform {
     pluginVerification {
         ides {
             recommended()
+
+            // The plugin depends on `com.intellij.modules.platform` and bundled
+            // YAML, and on nothing else — so the Marketplace will offer it to
+            // every JetBrains IDE, not just IDEA. `recommended()` resolves to
+            // IDEA Community alone, which makes the compatibility claim on the
+            // listing wider than anything that has been checked.
+            //
+            // These are the IDEs where Ansible repositories are actually opened:
+            // Ultimate, PyCharm (the Ansible/Python overlap), and GoLand.
+            //
+            // `PyCharmProfessional` (PY), not `PyCharmCommunity` (PC): JetBrains
+            // merged the two into one PyCharm product, so PC has no 252 release
+            // and naming it here matches nothing — silently, which is worse than
+            // failing. Check the verified-IDE list in the log when changing this.
+            select {
+                types = listOf(
+                    IntelliJPlatformType.IntellijIdeaUltimate,
+                    IntelliJPlatformType.PyCharmProfessional,
+                    IntelliJPlatformType.GoLand,
+                )
+                channels = listOf(ProductRelease.Channel.RELEASE)
+                sinceBuild = providers.gradleProperty("pluginSinceBuild")
+                untilBuild = providers.gradleProperty("pluginSinceBuild").map { "$it.*" }
+            }
         }
     }
 }

@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>dev.yamlix.ansible</id>
-    <name>Yamlix - Ansible Variable Resolution</name>
-    <vendor url="https://github.com/tadsache/yamlix">tadsache</vendor>
+    <name>Yamlix for Ansible</name>
+    <vendor email="support@yamlix.dev" url="https://github.com/tadsache/yamlix">tadsache</vendor>
 
     <description><![CDATA[
     <p><b>Which value does this variable actually have — on which host, and why?</b></p>
@@ -40,24 +40,32 @@
 
     <p>Reuses the platform's YAML PSI. Registers no file type, does not claim
     <code>*.yml</code>, and never shells out to <code>ansible</code>. Ansible context is
-    detected structurally, per file.</p>
+    detected structurally, per file, and the tool window does not appear in projects that
+    have no Ansible in them.</p>
+
+    <p><b>It makes no network calls and collects nothing.</b> Everything it knows comes from
+    the files already open in your IDE.</p>
 
     <p><i>Not affiliated with or endorsed by Red Hat. Ansible is a trademark of Red Hat, Inc.</i></p>
     ]]></description>
 
     <change-notes><![CDATA[
-    <p>See the <a href="https://github.com/tadsache/yamlix/blob/main/CHANGELOG.md">changelog</a>
-    for the full history.</p>
+    <p><b>0.1.0</b> — first release. It answers one question: which value a variable actually
+    has, on which host, and why.</p>
     <ul>
-      <li>New Ansible tool window: the variables of the file you are reading, their effective
-      values, and where each one comes from.</li>
-      <li>Variable resolution roughly twenty times faster on fleet-sized projects.</li>
-      <li>A <code>hosts:</code> pattern that cannot be evaluated no longer makes a role's
-      variables resolve to nothing.</li>
-      <li><code>group_vars</code>/<code>host_vars</code> beside the playbook are recognised and
-      correctly outrank the inventory's own.</li>
-      <li>Playbooks are found anywhere under the <code>ansible.cfg</code> directory.</li>
+      <li>An <b>Ansible tool window</b> listing every variable the open file uses and defines,
+      its effective value, and which playbooks and hosts reach the file.</li>
+      <li><b>Ctrl/⌘+Click</b> on a variable, ordered by what applies at the caret rather than
+      by name; <b>Quick Documentation</b> showing the effective value per inventory and host.</li>
+      <li><b>Navigation</b> for roles, includes, <code>vars_files</code>, template and copy
+      sources, handlers, and <code>hosts:</code> patterns into INI and YAML inventories, plus
+      <b>Find Usages</b> in the other direction.</li>
+      <li>Anything only knowable at run time is shown as unresolved with the raw template.
+      Nothing is guessed.</li>
     </ul>
+    <p>Precedence was verified against ansible-core 2.20.4 rather than read from the
+    documentation. See the
+    <a href="https://github.com/tadsache/yamlix/blob/main/CHANGELOG.md">changelog</a>.</p>
     ]]></change-notes>
 
     <depends>com.intellij.modules.platform</depends>

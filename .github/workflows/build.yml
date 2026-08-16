@@ -54,11 +54,14 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      # `pluginVerification { ides { recommended() } }` in build.gradle.kts
-      # resolves the IDE set, so this widens automatically as JetBrains ships
-      # releases. The plugin declares no upper build bound and uses several
-      # experimental APIs; this job is what makes that honest rather than
-      # optimistic.
+      # `pluginVerification { ides { ... } }` in build.gradle.kts resolves the
+      # IDE set — `recommended()` plus Ultimate, PyCharm and GoLand — so this
+      # widens automatically as JetBrains ships releases. The plugin depends
+      # only on the platform and bundled YAML, so the Marketplace offers it to
+      # every JetBrains IDE; verifying against one would make that claim wider
+      # than anything checked. The plugin also declares no upper build bound and
+      # uses several experimental APIs; this job is what makes all of that
+      # honest rather than optimistic.
       - name: Plugin Verifier
         run: ./gradlew verifyPlugin --no-configuration-cache
 

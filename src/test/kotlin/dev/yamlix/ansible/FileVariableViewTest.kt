@@ -5,6 +5,7 @@ import dev.yamlix.ansible.overview.FileVariableView
 import dev.yamlix.ansible.overview.FileVariableViewService
 import dev.yamlix.ansible.overview.FileViewTree
 import dev.yamlix.ansible.overview.HintNode
+import dev.yamlix.ansible.overview.OverriddenSitesNode
 import dev.yamlix.ansible.overview.RowStatus
 import dev.yamlix.ansible.overview.SectionNode
 import dev.yamlix.ansible.overview.SiteNode
@@ -387,6 +388,35 @@ class FileVariableViewTest : FleetFixtureTestCase() {
             val detail = child.node.detail!!
             assertFalse("no newlines: $detail", detail.contains("\n"))
             assertTrue("path survives: $detail", detail.contains(".yml"))
+        }
+    }
+
+    /**
+     * The fold is all-or-nothing, per variable.
+     *
+     * Stated as an invariant over every row rather than about one variable,
+     * because which fixture variable happens to have two losers is exactly the
+     * kind of fact that changes when the fixture does. See
+     * [OverriddenSitesFoldTest] for the case that does fold.
+     */
+    fun testLosersAreEitherAllFoldedOrAllInPlace() {
+        val sections = FileViewTree.build(ViewState.Ready(view(taskFile)))
+            .filter { it.node is SectionNode }
+
+        for (row in sections.flatMap { it.children }.filter { it.node is VariableRowNode }) {
+            val fold = row.children.singleOrNull { it.node is OverriddenSitesNode }
+            val loose = row.children.mapNotNull { it.node as? SiteNode }
+                .count { it.site.status == SiteStatus.OVERRIDDEN }
+
+            if (fold == null) {
+                assertTrue("${row.node.text} keeps few losers in place: $loose", loose <= 2)
+            } else {
+                assertEquals("${row.node.text} folds all of them", 0, loose)
+                assertTrue(
+                    "${row.node.text} folds enough to be worth it",
+                    fold.children.size >= 3,
+                )
+            }
         }
     }
 
