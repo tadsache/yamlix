@@ -1,5 +1,0 @@
----
-# depth 2, default priority (1)
-app_port: 8030
-app_workers: 4
-app_log_level: info

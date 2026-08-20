@@ -13,8 +13,9 @@ import dev.yamlix.ansible.refs.AnsibleReferenceBase
 import org.jetbrains.yaml.psi.YAMLScalar
 
 /**
- * Loads `fleet-fixture/` — the real-world-shaped reproduction described in
- * FLEET-FIXTURE-CASES.md — into the test project. See [AnsibleFixtureTestCase]
+ * Loads `src/test/testData/fleet-fixture` — the real-world-shaped reproduction
+ * described in docs/FLEET-FIXTURE-CASES.md — into the test project. See
+ * [AnsibleFixtureTestCase]
  * for the sibling fixture this mirrors the shape of.
  */
 abstract class FleetFixtureTestCase : BasePlatformTestCase() {

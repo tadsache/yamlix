@@ -20,7 +20,7 @@ see below.
 Requires a JDK 17+ to run Gradle; the build provisions a JDK 21 toolchain.
 
 ```bash
-./gradlew test           # 216 tests
+./gradlew test           # 214 tests
 ./gradlew verifyPlugin   # IntelliJ Plugin Verifier, against IDEA CE/Ultimate, PyCharm, GoLand
 ./gradlew runIde         # sandbox IDE with the plugin loaded
 ./gradlew buildPlugin    # installable zip in build/distributions
@@ -29,15 +29,17 @@ Requires a JDK 17+ to run Gradle; the build provisions a JDK 21 toolchain.
 `runIde` takes a path argument to open a project directly:
 
 ```bash
-./gradlew runIde --args="$PWD/fleet-fixture"
+./gradlew runIde --args="$PWD/src/test/testData/fleet-fixture"
 ```
 
 ## The fixtures are the specification
 
-`test-fixture/` and `fleet-fixture/` are synthetic Ansible projects that define
-what correct means. `src/test/testData/` holds byte-identical copies, and
-`FixtureIntegrityTest` / `FleetFixtureIntegrityTest` fail if the two ever drift
-— so the spec cannot be quietly edited to match the code.
+`src/test/testData/fixture/` and `src/test/testData/fleet-fixture/` are
+synthetic Ansible projects that define what correct means. The tables they
+answer to live in [docs/NAVIGATION-CASES.md](docs/NAVIGATION-CASES.md) and
+[docs/FLEET-FIXTURE-CASES.md](docs/FLEET-FIXTURE-CASES.md), and every expected
+value in those was produced by running real Ansible — so the spec cannot be
+quietly rewritten to match the code.
 
 Two rules follow from that:
 
@@ -47,9 +49,9 @@ Two rules follow from that:
    `ansible-inventory` against the fixture and put what it printed in the commit
    message.
 2. **A bug fix starts with a fixture case.** Add the layout that reproduces it
-   to `fleet-fixture/` (with its entry in `FLEET-FIXTURE-CASES.md`), copy it into
-   `src/test/testData/`, then fix the code. Every identifier must be invented —
-   no real variable name, hostname, or URL.
+   to `src/test/testData/fleet-fixture/` (with its entry in
+   `docs/FLEET-FIXTURE-CASES.md`), then fix the code. Every identifier must be
+   invented — no real variable name, hostname, or URL.
 
 ## What a good change looks like
 

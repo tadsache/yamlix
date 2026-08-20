@@ -1,7 +1,0 @@
----
-# NAV: F19 — the task that produces `probe_status`. Nothing in the repository
-# holds its value; only Ansible, at run time, once this has run.
-- name: collect the probe status
-  ansible.builtin.command: /usr/bin/probe --status
-  register: probe_status
-  changed_when: false

@@ -5,9 +5,11 @@ built to reproduce the real-world project layout and bug reports that drove a
 string of fixes to this plugin. Nothing here is a real variable name,
 hostname, group name, or URL; every identifier is invented for this fixture.
 
-Where `test-fixture/` (see `NAVIGATION-CASES.md`) is a small, general-purpose
-specification of Ansible's precedence rules, `fleet-fixture/` exists
-specifically to keep the following real-world-shaped bugs from regressing:
+Where `src/test/testData/fixture/` (see
+[NAVIGATION-CASES.md](NAVIGATION-CASES.md)) is a small, general-purpose
+specification of Ansible's precedence rules, `src/test/testData/fleet-fixture/`
+exists specifically to keep the following real-world-shaped bugs from
+regressing:
 
 ## What the fixture contains
 

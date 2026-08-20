@@ -1,6 +1,0 @@
----
-# NAV: F14 — this playbook lives in `playbooks/`, so the `group_vars/` Ansible
-# loads alongside it is `playbooks/group_vars/`, not the project root's.
-- hosts: web_app
-  roles:
-    - pattern_probe_agent

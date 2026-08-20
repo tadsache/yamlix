@@ -1,3 +1,0 @@
----
-monitoring_source: unknown
-monitoring_scrape_url: "http://{{ inventory_hostname }}:{{ app_port }}/metrics"

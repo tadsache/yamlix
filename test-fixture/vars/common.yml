@@ -1,5 +1,0 @@
----
-# Loaded through the playbook's vars_files: (precedence 15).
-# Higher than play vars (13), lower than role vars (16).
-app_port: 8070
-app_banner: "{{ app_name }} on {{ inventory_hostname }}"

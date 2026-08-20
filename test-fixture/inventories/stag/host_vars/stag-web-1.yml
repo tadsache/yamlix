@@ -1,4 +1,0 @@
----
-# Beats every group_vars file, regardless of depth or priority.
-app_port: 8050
-app_workers: 6

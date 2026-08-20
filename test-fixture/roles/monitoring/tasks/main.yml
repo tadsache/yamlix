@@ -1,7 +1,0 @@
----
-- name: Report what the dynamically included role sees
-  ansible.builtin.debug:
-    msg: >-
-      ROLE-MONITORING source={{ monitoring_source }}
-      app_port={{ app_port }}
-      scrape={{ monitoring_scrape_url }}

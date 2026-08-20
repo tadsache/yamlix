@@ -1,9 +1,0 @@
----
-#
-# Only special_group hosts get the override; everyone else in every
-# environment falls through to the project-root group_vars/all.yml default.
-#
-artifact_repo:
-  url: "https://repo-special.example.test/override-release"
-  auth_header:
-    X-Api-Key: "REDACTED-SPECIAL"

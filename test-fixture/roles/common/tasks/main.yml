@@ -1,6 +1,0 @@
----
-- name: Report what the dependency role sees
-  ansible.builtin.debug:
-    msg: >-
-      ROLE-COMMON reason={{ common_reason | default('standalone') }}
-      app_port={{ app_port }}

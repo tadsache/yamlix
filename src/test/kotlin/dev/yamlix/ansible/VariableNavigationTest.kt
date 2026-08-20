@@ -143,7 +143,7 @@ class VariableNavigationTest : AnsibleFixtureTestCase() {
      *
      * Returning bare PSI leaves made the platform render the variable name plus
      * the project directory, identically, once per site — nine rows saying
-     * `app_workers  test-fixture`.
+     * `app_workers  fixture`.
      */
     fun testPickerRowsAreDistinguishable() {
         val rows = rows(variableReference("roles/app/tasks/main.yml", 12, "app_workers"))

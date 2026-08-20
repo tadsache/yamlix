@@ -12,6 +12,9 @@ ansible [core 2.20.4]   python 3.14.4   macOS (ansible_os_family = Darwin)
 All commands were run from the fixture root: test-fixture/
 ```
 
+The fixture now lives at `src/test/testData/fixture/`; the transcripts below
+were recorded when it sat at the repository root, and are quoted verbatim.
+
 ---
 
 ## 0. What the fixture contains

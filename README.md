@@ -6,6 +6,10 @@
 
 **Which value does this variable actually have — on which host, and why?**
 
+Install from the JetBrains Marketplace:
+**[Yamlix for Ansible](https://plugins.jetbrains.com/plugin/33589-yamlix-for-ansible)**
+— or search *Yamlix* under **Settings → Plugins → Marketplace**.
+
 A JetBrains IDE plugin for Ansible projects — it depends only on the platform and
 bundled YAML, so it runs in IDEA, PyCharm, GoLand and the rest. A variable in Ansible does not have
 *a* definition: it has as many as the precedence table allows, and which one wins
@@ -30,7 +34,7 @@ environment, that is what this is for. They coexist.
 
 ```
 Any JetBrains IDE 2025.2+ (sinceBuild 252, no upper bound)   Kotlin · Gradle 9 · IJPGP 2.x
-216 tests · Plugin Verifier: Compatible on IDEA CE/Ultimate, PyCharm, GoLand
+214 tests · Plugin Verifier: Compatible on IDEA CE/Ultimate, PyCharm, GoLand
 ```
 
 ---
@@ -124,9 +128,9 @@ an inventory variable — it says so plainly rather than hedging.
 The specification is a real Ansible repo, not prose.
 
 ```
-test-fixture/                  a small but deliberately nasty Ansible project
-test-fixture/NAVIGATION-CASES.md   13 navigation cases, verified resolution
-                                   tables, and the rules as pseudocode
+src/test/testData/fixture/     a small but deliberately nasty Ansible project
+docs/NAVIGATION-CASES.md       13 navigation cases, verified resolution
+                               tables, and the rules as pseudocode
 ```
 
 Every expected value in that document was produced by running
@@ -141,11 +145,12 @@ two places where real Ansible contradicted the obvious prediction:
    honoured from the inventory source, because `group_vars` files are merged
    *using* the priority that already exists on the group.
 
-`src/test/testData/fixture` is a byte-identical copy, and a test asserts it stays
-that way — so the specification cannot be quietly edited to match the code.
+Because every expected value came out of real Ansible rather than out of the
+implementation, the document is a specification the code answers to, not a
+transcript of what the code happens to do.
 
-A second, independent fixture — `fleet-fixture/`, documented in
-`fleet-fixture/FLEET-FIXTURE-CASES.md` — exists purely to keep real-world bug
+A second, independent fixture — `src/test/testData/fleet-fixture/`, documented
+in [docs/FLEET-FIXTURE-CASES.md](docs/FLEET-FIXTURE-CASES.md) — exists purely to keep real-world bug
 reports from regressing: a project-root `group_vars/all.yml` sibling to
 `inventories/`, plain-INI inventories with no file extension, a role's
 `hosts:` pattern matching a sliver of a much bigger inventory, playbooks that
@@ -154,8 +159,7 @@ open with an `import_playbook` step before their real play,
 symlinked directory, host patterns the plugin cannot model (`web*`,
 `localhost`), one role shared by two plays with different `hosts:`, and
 playbook-adjacent `group_vars/`. Every identifier in it is invented — no real
-variable name, hostname, or URL. Same integrity guarantee as the first
-fixture (`FleetFixtureIntegrityTest`), same "byte-identical copy" rule.
+variable name, hostname, or URL.
 
 `ScaleBenchmarkTest` generates a fleet-sized project — 16 inventories, 300
 hosts each, 25 playbooks, 60 roles — and asserts that resolving a variable
@@ -171,13 +175,13 @@ the UI on a real project.
 Requires a JDK 17+ to run Gradle; the build provisions a JDK 21 toolchain.
 
 ```bash
-./gradlew test           # 216 tests
+./gradlew test           # 214 tests
 ./gradlew verifyPlugin   # IntelliJ Plugin Verifier
 ./gradlew runIde         # sandbox IDE with the plugin loaded
 ./gradlew buildPlugin    # build/distributions/yamlix-<version>.zip
 ```
 
-To try it: `runIde`, then open `test-fixture/` in the sandbox IDE. Wait for
+To try it: `runIde`, then open `src/test/testData/fixture/` in the sandbox IDE. Wait for
 indexing to finish — variable resolution is index-backed and reports
 *"Indexing — variable resolution is not available yet"* until it completes.
 
@@ -249,22 +253,22 @@ Two pieces are worth knowing about:
   makes "before the `set_fact`" and "after it" different answers.
 
 `VariableResolutionService` encodes the rules as pseudocode'd in
-`NAVIGATION-CASES.md` §4.
+[docs/NAVIGATION-CASES.md](docs/NAVIGATION-CASES.md) §4.
 
 ---
 
 ## Status
 
-Submitted to the JetBrains Marketplace as
-[plugin 33589](https://plugins.jetbrains.com/plugin/33589-yamlix-for-ansible)
-and awaiting review. Until that clears, install the signed zip from the
-[releases page](https://github.com/tadsache/yamlix/releases) by hand:
+Published on the JetBrains Marketplace as
+**[Yamlix for Ansible](https://plugins.jetbrains.com/plugin/33589-yamlix-for-ansible)**.
+Install it from inside the IDE — **Settings → Plugins → Marketplace**, search
+for *Yamlix* — or take the signed zip from the
+[releases page](https://github.com/tadsache/yamlix/releases) and use
 **Settings → Plugins → ⚙ → Install Plugin from Disk**.
 
 Releasing is automated: a `v*` tag runs the tests and the Plugin Verifier,
 signs the plugin, publishes it to the Marketplace and drafts a GitHub release
-with the same signed zip. [RELEASING.md](RELEASING.md) covers the setup, and
-the one manual step JetBrains requires for a plugin's first ever upload.
+with the same signed zip.
 
 Known rough edge beyond the limitations above: the role graph is walked by
 three separate traversals that should be one service.
@@ -285,7 +289,7 @@ fix starts with a fixture case. Vulnerabilities go to the address in
 
 [Apache License 2.0](LICENSE).
 
-The `test-fixture/` directory is a synthetic Ansible project written as the
-specification for this plugin. It describes no real infrastructure and contains
-no credentials: every task is `debug`, `file`, `copy` or `template`, and every
+The fixtures under `src/test/testData/` are synthetic Ansible projects written
+as the specification for this plugin. They describe no real infrastructure and
+contain no credentials: every task is `debug`, `file`, `copy` or `template`, and every
 host is `127.0.0.1` over a local connection.

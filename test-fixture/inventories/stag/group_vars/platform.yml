@@ -1,8 +1,0 @@
----
-# depth 1 — loses to any depth-2 group that also defines these.
-app_port: 8020
-app_workers: 3
-platform_owner: sre
-
-# app_log_level is defined ONLY in group_vars, so the group graph decides it.
-app_log_level: warning

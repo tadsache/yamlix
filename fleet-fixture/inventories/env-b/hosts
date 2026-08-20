@@ -1,9 +1,0 @@
-[containers]
-b-host-01
-
-[legacy_hosts]
-b-host-02
-
-[web_app]
-b-host-03
-b-host-04

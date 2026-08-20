@@ -12,7 +12,7 @@ class GroupKeyConventionAbsentTest : AnsibleFixtureTestCase() {
     fun testNoConventionIsInventedForAProjectThatDoesNotUseOne() {
         val keys = GroupKeyConvention.getInstance(project).keys(file("site-playbook.yml"))
         assertEquals(
-            "test-fixture writes `hosts: webservers` literally, so there is " +
+            "the fixture writes `hosts: webservers` literally, so there is " +
                 "no variable to infer anything from",
             emptySet<String>(),
             keys,

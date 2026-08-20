@@ -1,7 +1,0 @@
----
-# NAV: F12 — a glob host pattern. `web_ap*` is not a literal group name, so
-# the plugin cannot enumerate the hosts it matches. It must therefore leave
-# the play unrestricted rather than narrow it to the empty set.
-- hosts: "web_ap*"
-  roles:
-    - pattern_probe_agent

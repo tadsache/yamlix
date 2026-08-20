@@ -28,9 +28,9 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      # The fixtures are the specification, and a test asserts that
-      # src/test/testData stays byte-identical to them — so this also proves
-      # the spec and the code have not drifted apart.
+      # The fixtures under src/test/testData are the specification: the
+      # navigation and resolution tables in docs/ were produced by running
+      # real Ansible against them, and the tests assert the plugin agrees.
       - name: Test
         run: ./gradlew test --no-configuration-cache
 
@@ -100,8 +100,7 @@ jobs:
   # `environment: marketplace` is the stop button: give that environment a
   # required reviewer in the repository settings and a tag waits for a human
   # before anything reaches the Marketplace. Without a reviewer configured it
-  # publishes straight through, which is a decision, not an accident — see
-  # RELEASING.md.
+  # publishes straight through, which is a decision, not an accident.
   release:
     needs: [test, verify, package]
     if: startsWith(github.ref, 'refs/tags/v')

@@ -1,6 +1,0 @@
----
-- name: Report from the out-of-tree role
-  ansible.builtin.debug:
-    msg: >-
-      ROLE-LEGACY-BACKUP (from external-roles/) host={{ inventory_hostname }}
-      app_port={{ app_port }}

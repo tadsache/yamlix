@@ -1,4 +1,0 @@
----
-# A host-specific override — the highest-precedence, narrowest possible site.
-artifact_repo:
-  url: "https://repo-canary.example.test/canary-release"

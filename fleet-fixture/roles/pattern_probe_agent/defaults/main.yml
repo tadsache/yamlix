@@ -1,5 +1,0 @@
----
-# NAV: the only definition of `probe_setting`. Cases F12-F14 all assert that
-# it stays reachable — a play's `hosts:` pattern that the plugin cannot fully
-# model must not make a role's own defaults disappear.
-probe_setting: from-role-defaults

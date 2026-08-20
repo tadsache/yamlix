@@ -1,7 +1,0 @@
----
-# NAV: a second role defining `agent_image` too, in a play that never shares
-# a playbook with `container_monitoring_agent` — the two must never resolve
-# into each other regardless of which one's task file the caret is in.
-- hosts: legacy_hosts
-  roles:
-    - legacy_monitoring_agent

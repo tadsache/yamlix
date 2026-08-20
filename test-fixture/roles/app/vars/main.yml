@@ -1,6 +1,0 @@
----
-# Precedence 16 — beats ALL inventory vars, play vars and vars_files.
-# This is the classic trap: no matter what host_vars says, inside role `app`
-# app_port is 8090 until something at precedence >= 19 changes it.
-app_port: 8090
-app_service: yamlix-app

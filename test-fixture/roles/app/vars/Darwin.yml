@@ -1,5 +1,0 @@
----
-# Selected at runtime by include_vars: "{{ ansible_os_family }}.yml".
-# Precedence 19 — beats role vars.
-app_port: 8100
-app_pkg_manager: brew

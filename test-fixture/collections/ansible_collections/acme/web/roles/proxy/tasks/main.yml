@@ -1,7 +1,0 @@
----
-- name: Report from the collection role
-  ansible.builtin.debug:
-    msg: >-
-      ROLE-ACME-WEB-PROXY host={{ inventory_hostname }}
-      app_port={{ app_port }}
-      backend={{ app_url }}
